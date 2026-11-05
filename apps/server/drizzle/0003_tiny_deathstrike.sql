@@ -1,0 +1,1 @@
+ALTER TABLE `queue_items` ADD `paid` integer DEFAULT 0 NOT NULL;

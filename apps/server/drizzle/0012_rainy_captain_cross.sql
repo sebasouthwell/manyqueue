@@ -1,0 +1,1 @@
+ALTER TABLE `guests` ADD `perms` text DEFAULT '[]' NOT NULL;

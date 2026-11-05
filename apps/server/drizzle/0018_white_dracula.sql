@@ -1,0 +1,1 @@
+ALTER TABLE `queue_items` ADD `near_end_skip` integer DEFAULT false NOT NULL;

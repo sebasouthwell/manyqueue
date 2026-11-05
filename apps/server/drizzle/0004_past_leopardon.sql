@@ -1,0 +1,1 @@
+ALTER TABLE `queue_items` ADD `plays_tonight` integer DEFAULT 0 NOT NULL;

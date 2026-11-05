@@ -1,0 +1,36 @@
+/* Nocturne tokens — exact values from ManyQueue Design Spec.dc.html §3 (purple direction, turn 3).
+   accent-100/200/300 and accent-700/800/900 are the doc's "ramp" stops, derived here by HSL
+   interpolation from --color-accent since the doc links out to an external _ds bundle
+   stylesheet (not present in this repo) for the literal ramp hex values. Swap in the real
+   ramp if/when that bundle is available. */
+:root {
+  --color-bg: 22 24 38; /* #161826 */
+  --color-section: 38 42 96; /* #262a60 */
+  --color-glow: 53 59 128; /* #353b80 */
+  --color-ghost: 76 83 151; /* #4c5397 */
+  --color-accent: 145 132 217; /* #9184d9 */
+
+  /* Working screens (the host desk) sit on the plain ground with quiet neutral panels; the purple is kept
+     for "presence" moments (the now-playing strip, the TV, takeovers). */
+  --color-panel: 28 30 46; /* #1c1e2e */
+  --color-panel-line: 46 49 71; /* #2e3147 */
+
+  --color-accent-100: 235 233 246; /* #ebe9f6 — titles on violet grounds */
+  --color-accent-200: 206 200 238; /* #cec8ee — secondary text */
+  --color-accent-300: 171 161 226; /* #aba1e2 — labels */
+  --color-accent-400: 145 132 217; /* the accent itself */
+  --color-accent-500: 118 102 200; /* #7666c8 */
+  --color-accent-600: 92 76 180; /* #5c4cb4 — progress fills, glows */
+  --color-accent-700: 65 48 156; /* #41309c — tinted fills: token pill, "yours" rows */
+  --color-accent-800: 48 36 117; /* #302475 */
+  --color-accent-900: 36 26 86; /* #241a56 */
+
+  --color-success: 74 222 128;
+  --color-danger: 248 113 113;
+
+  --radius-md: 8px; /* controls and art */
+  --radius-lg: 14px; /* cards, sheets and art on the TV */
+  --radius-sheet: 24px; /* sheets' top corners only */
+
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
+}

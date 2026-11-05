@@ -1,0 +1,1 @@
+ALTER TABLE `guests` ADD `can_announce` integer DEFAULT true NOT NULL;
