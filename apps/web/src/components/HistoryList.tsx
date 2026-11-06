@@ -5,6 +5,7 @@ import { useRoomStore } from "../store/roomStore";
 import { Emoji } from "./Emoji";
 import { formatDuration } from "../lib/format";
 import { topReaction } from "@manyqueue/shared";
+import { HatCover } from "./Holiday";
 
 /** What already played tonight, newest first. Reloads when the song changes so
  * it stays current while it's open. Used in the phone sheet and on the host desk. */
@@ -39,7 +40,7 @@ export function HistoryList({ code, limit }: { code: string; limit?: number }) {
         <li key={item.id} className="flex items-center gap-3 rounded-md bg-bg p-2">
           <span className="w-6 text-right text-xs tabular-nums text-accent-300">{items.length - i}</span>
           {item.albumArtUrl ? (
-            <img src={item.albumArtUrl} alt="" className="h-11 w-11 rounded" />
+            <HatCover trackName={item.trackName} size={44}><img src={item.albumArtUrl} alt="" className="h-11 w-11 rounded" /></HatCover>
           ) : (
             <div className="h-11 w-11 rounded bg-accent-800" />
           )}

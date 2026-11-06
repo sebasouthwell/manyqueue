@@ -1,9 +1,13 @@
 import { useEffect, useRef, useState } from "react";
-import { ArrowBendUpRight, CaretDown, CaretLeft, CaretRight, GearSix, Shuffle, SkipForward, X } from "@phosphor-icons/react";
+import { ArrowBendUpRight, ArrowDown, ArrowUp, CaretDown, CaretLeft, CaretRight, DotsSixVertical, GearSix, PushPin, Shuffle, SkipForward, X } from "@phosphor-icons/react";
+import { DndContext, closestCenter, PointerSensor, TouchSensor, useSensor, useSensors, type DragEndEvent } from "@dnd-kit/core";
+import { SortableContext, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 import { TURN_WEIGHTS, type HostRotationBoardView, type RoomSettings } from "@manyqueue/shared";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import { useRoomStore } from "../store/roomStore";
 import { Emoji } from "./Emoji";
+import { HatCover } from "./Holiday";
 
 type BoardGuest = HostRotationBoardView["guests"][number];
 
@@ -58,6 +62,14 @@ export function HostRotationBoard({ code }: { code: string }) {
     });
   }
 
+  async function reorderQueue(guestId: string, itemIds: string[]) {
+    await fetch(`/rooms/${code}/guests/${guestId}/mine/order`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ itemIds }),
+    });
+  }
+
   async function skipTurn(guestId: string) {
     await fetch(`/rooms/${code}/rotation`, {
       method: "POST",
@@ -73,6 +85,10 @@ export function HostRotationBoard({ code }: { code: string }) {
       body: JSON.stringify({ weight: { guestId, value } }),
     });
   }
+
+  // Hooks above the early return below: React needs the same hooks on every render (this one after it
+  // crashed the host page the moment the board loaded).
+  const dragSensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }), useSensor(TouchSensor, { activationConstraint: { delay: 150, tolerance: 6 } }));
 
   if (!board || !settings) {
     return (
@@ -97,6 +113,19 @@ export function HostRotationBoard({ code }: { code: string }) {
   for (const g of board.guests) if (!seen.has(g.guestId) && !g.empty) order.push(g);
   for (const g of board.guests) if (!seen.has(g.guestId) && g.empty) order.push(g);
   const open = person ? guestById.get(person.guestId) : undefined;
+
+  // Coming up: the host's pinned songs drag to any slot; everyone else's rows just make room.
+  const upcomingIds = board.upcoming.map((slot, i) => (slot.kind === "host" && slot.itemId ? `host:${slot.itemId}` : `slot:${i}`));
+  async function setHostSlot(itemId: string, slot: number | null) {
+    await fetch(`/rooms/${code}/host-picks/${itemId}/slot`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ slot }) });
+  }
+  function onUpcomingDragEnd(e: DragEndEvent) {
+    const from = String(e.active.id);
+    if (!e.over || !from.startsWith("host:")) return;
+    const to = upcomingIds.indexOf(String(e.over.id));
+    if (to < 0 || to === upcomingIds.indexOf(from)) return;
+    void setHostSlot(from.slice(5), to);
+  }
 
   const scrollStrip = (dir: 1 | -1) => strip.current?.scrollBy({ left: dir * strip.current.clientWidth * 0.8, behavior: "smooth" });
   const art = (url: string | null, size: string) =>
@@ -212,37 +241,60 @@ export function HostRotationBoard({ code }: { code: string }) {
             })}
           </>
         )}
-        {board.upcoming.map((slot, i) => {
-          const g = slot.guestId ? guestById.get(slot.guestId) : undefined;
-          if (i === 0 && board.pendingDraft) return null; // shown in the card above
-          return (
-            <button
-              key={i}
-              type="button"
-              disabled={!g}
-              onClick={() => g && setPerson({ guestId: g.guestId, highlight: slot.itemId })}
-              className="flex items-center gap-3 rounded-md bg-bg px-2 py-1.5 text-left"
-            >
-              <span className="w-5 shrink-0 text-right text-xs tabular-nums text-accent-300">{board.onDeck.length + i + 1}</span>
-              {slot.kind === "guest" ? (
-                <>
-                  {art(slot.albumArtUrl, "h-9 w-9")}
-                  <div className="min-w-0 flex-1">
-                    <p className="truncate text-sm text-accent-100">{slot.trackName ?? "—"}</p>
-                    <p className="truncate text-xs text-accent-300">
-                      {slot.addedBy ? `${slot.addedBy.emoji} ${slot.addedBy.nickname}` : ""}
-                      {slot.artistName ? ` · ${slot.artistName}` : ""}
-                    </p>
-                  </div>
-                </>
-              ) : (
-                <p className="truncate text-sm text-accent-200">
-                  {slot.kind === "mystery" ? "🕵️ Mystery pick" : "🎲 House music until someone adds a song"}
-                </p>
-              )}
-            </button>
-          );
-        })}
+        <DndContext sensors={dragSensors} collisionDetection={closestCenter} onDragEnd={onUpcomingDragEnd}>
+          <SortableContext items={upcomingIds} strategy={verticalListSortingStrategy}>
+            {board.upcoming.map((slot, i) => {
+              const g = slot.guestId ? guestById.get(slot.guestId) : undefined;
+              if (i === 0 && board.pendingDraft && slot.kind !== "host") return null; // shown in the card above
+              return (
+                <UpcomingRow key={upcomingIds[i]} id={upcomingIds[i]} draggable={slot.kind === "host"}>
+                  {(handle) => (
+                    <div className="flex items-center gap-3 rounded-md bg-bg px-2 py-1.5 text-left">
+                      <span className="w-5 shrink-0 text-right text-xs tabular-nums text-accent-300">{board.onDeck.length + i + 1}</span>
+                      {slot.kind === "host" ? (
+                        <>
+                          {handle}
+                          {art(slot.albumArtUrl, "h-9 w-9")}
+                          <div className="min-w-0 flex-1">
+                            <p className="truncate text-sm text-accent-100">{slot.trackName ?? "—"}</p>
+                            <p className="truncate text-xs text-accent-300">🏠 Your pick · drag to move{slot.artistName ? ` · ${slot.artistName}` : ""}</p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => slot.itemId && void setHostSlot(slot.itemId, null)}
+                            className="shrink-0 rounded-full border border-panel-line px-2 py-0.5 text-[11px] text-accent-200"
+                            aria-label={`Unpin ${slot.trackName ?? "your pick"}`}
+                          >
+                            Unpin
+                          </button>
+                        </>
+                      ) : (
+                        <button type="button" disabled={!g} onClick={() => g && setPerson({ guestId: g.guestId, highlight: slot.itemId })} className="flex min-w-0 flex-1 items-center gap-3 text-left">
+                          {slot.kind === "guest" ? (
+                            <>
+                              {art(slot.albumArtUrl, "h-9 w-9")}
+                              <div className="min-w-0 flex-1">
+                                <p className="truncate text-sm text-accent-100">{slot.trackName ?? "—"}</p>
+                                <p className="truncate text-xs text-accent-300">
+                                  {slot.addedBy ? `${slot.addedBy.emoji} ${slot.addedBy.nickname}` : ""}
+                                  {slot.artistName ? ` · ${slot.artistName}` : ""}
+                                </p>
+                              </div>
+                            </>
+                          ) : (
+                            <p className="truncate text-sm text-accent-200">
+                              {slot.kind === "mystery" ? "🕵️ Mystery pick" : "🎲 House music until someone adds a song"}
+                            </p>
+                          )}
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </UpcomingRow>
+              );
+            })}
+          </SortableContext>
+        </DndContext>
         <p className="mt-1 text-[10px] text-accent-300">
           {board.onDeck.length <= 1 ? "The next song is drafted about 15 seconds before this one ends. " : ""}
           {board.ballot
@@ -252,6 +304,40 @@ export function HostRotationBoard({ code }: { code: string }) {
               : "Coming up is a forecast from everyone's queues in turn order; guests can reorder until their song is drafted. Tap a person or a song to manage them."}
         </p>
       </div>
+
+      {(board.house ?? []).length > 0 && (
+        <div className="flex flex-col gap-2 rounded-lg bg-panel ring-1 ring-panel-line p-4">
+          <p className="text-xs uppercase tracking-wide text-accent-300">🏠 Your house picks · {board.house.length}</p>
+          <p className="text-[11px] text-accent-300">They play, in this order, whenever nobody has a song waiting, before the fallback playlist. Place one in Coming up to drag it to an exact slot.</p>
+          <div className="flex flex-col gap-1">
+            {board.house.map((h) => (
+              <div key={h.id} className="flex items-center gap-2 rounded-md bg-bg px-2 py-1.5">
+                {h.albumArtUrl ? <HatCover trackName={h.trackName} size={32}><img src={h.albumArtUrl} alt="" className="h-8 w-8 rounded" /></HatCover> : <div className="h-8 w-8 rounded bg-accent-800" />}
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-xs text-accent-100">{h.trackName}</p>
+                  <p className="truncate text-[11px] text-accent-300">{h.artistName}</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void setHostSlot(h.id, board.upcoming.filter((u) => u.kind !== "house").length)}
+                  className="flex items-center gap-1 rounded-full border border-panel-line px-2 py-0.5 text-[11px] text-accent-200"
+                  aria-label={`Place ${h.trackName} in Coming up`}
+                >
+                  <PushPin size={11} /> Place
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void fetch(`/rooms/${code}/queue/${h.id}`, { method: "DELETE" })}
+                  className="rounded-full border border-panel-line px-2 py-0.5 text-[11px] text-accent-200"
+                  aria-label={`Remove ${h.trackName}`}
+                >
+                  Remove
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {board.pool.length > 0 && (
         <div className="flex flex-col gap-2 rounded-lg bg-panel ring-1 ring-panel-line p-4">
@@ -338,6 +424,7 @@ export function HostRotationBoard({ code }: { code: string }) {
           onDraft={(id) => { draftItem(id); setPerson(null); }}
           onSkip={() => { skipTurn(open.guestId); setPerson(null); }}
           onWeight={(w) => setWeight(open.guestId, w)}
+          onReorder={(ids) => reorderQueue(open.guestId, ids)}
         />
       )}
     </div>
@@ -371,7 +458,7 @@ function PendingDraftCard({
       </p>
       <div className="flex items-center gap-3">
         {pending.albumArtUrl ? (
-          <img src={pending.albumArtUrl} alt="" className="h-10 w-10 shrink-0 rounded" />
+          <HatCover trackName={pending.trackName} size={40}><img src={pending.albumArtUrl} alt="" className="h-10 w-10 shrink-0 rounded" /></HatCover>
         ) : (
           <div className="h-10 w-10 shrink-0 rounded bg-accent-800" />
         )}
@@ -408,6 +495,7 @@ function PersonModal({
   onDraft,
   onSkip,
   onWeight,
+  onReorder,
 }: {
   guest: BoardGuest;
   highlight: string | null;
@@ -416,7 +504,21 @@ function PersonModal({
   onDraft: (itemId: string) => void;
   onSkip: () => void;
   onWeight: (w: number) => void;
+  onReorder: (itemIds: string[]) => void;
 }) {
+  // Shown at once; the board's next update confirms it.
+  const [order, setOrder] = useState<string[] | null>(null);
+  useEffect(() => setOrder(null), [g.songs]);
+  const byId = new Map(g.songs.map((s) => [s.id, s]));
+  const songs = order ? order.map((id) => byId.get(id)).filter((s): s is (typeof g.songs)[number] => !!s) : g.songs;
+  const move = (from: number, to: number) => {
+    if (to < 0 || to >= songs.length) return;
+    const ids = songs.map((s) => s.id);
+    const [moved] = ids.splice(from, 1);
+    ids.splice(to, 0, moved);
+    setOrder(ids);
+    onReorder(ids);
+  };
   const panel = useRef<HTMLDivElement>(null);
   useFocusTrap(panel, true);
   const close = useRef(onClose);
@@ -484,7 +586,8 @@ function PersonModal({
         )}
 
         <div className="flex min-h-0 flex-col gap-1 overflow-y-auto">
-          {g.songs.map((s, i) => (
+          {songs.length > 1 && <p className="text-[10px] text-accent-300">Use the arrows to change the order their songs are drafted in.</p>}
+          {songs.map((s, i) => (
             <div
               key={s.id}
               id={`pm-${s.id}`}
@@ -492,10 +595,28 @@ function PersonModal({
               style={{ background: s.id === highlight ? "rgb(var(--color-accent-700) / 0.5)" : "rgb(var(--color-bg))" }}
             >
               <span className="w-4 shrink-0 text-right text-[10px] tabular-nums text-accent-300">{i + 1}</span>
-              {s.albumArtUrl ? <img src={s.albumArtUrl} alt="" className="h-9 w-9 shrink-0 rounded" /> : <div className="h-9 w-9 shrink-0 rounded bg-accent-800" />}
+              {s.albumArtUrl ? <HatCover trackName={s.trackName} size={36}><img src={s.albumArtUrl} alt="" className="h-9 w-9 shrink-0 rounded" /></HatCover> : <div className="h-9 w-9 shrink-0 rounded bg-accent-800" />}
               <div className="min-w-0 flex-1">
                 <p className="truncate text-sm text-accent-100">{s.trackName}</p>
                 <p className="truncate text-xs text-accent-300">{s.artistName}</p>
+              </div>
+              <div className="flex shrink-0 flex-col">
+                <button
+                  onClick={() => move(i, i - 1)}
+                  disabled={i === 0}
+                  className="rounded p-0.5 text-accent-300 disabled:opacity-25"
+                  aria-label={`Move ${s.trackName} up`}
+                >
+                  <ArrowUp size={13} />
+                </button>
+                <button
+                  onClick={() => move(i, i + 1)}
+                  disabled={i === songs.length - 1}
+                  className="rounded p-0.5 text-accent-300 disabled:opacity-25"
+                  aria-label={`Move ${s.trackName} down`}
+                >
+                  <ArrowDown size={13} />
+                </button>
               </div>
               <button
                 onClick={() => onDraft(s.id)}
@@ -508,6 +629,22 @@ function PersonModal({
           ))}
         </div>
       </div>
+    </div>
+  );
+}
+
+/** A Coming up row in the drag list. Only the host's own picks can be dragged (by their handle); the
+ * rest hold their places and make room. */
+function UpcomingRow({ id, draggable, children }: { id: string; draggable: boolean; children: (handle: React.ReactNode) => React.ReactNode }) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id, disabled: !draggable });
+  const handle = draggable ? (
+    <button {...attributes} {...listeners} type="button" className="grid h-8 w-6 shrink-0 touch-none place-items-center text-accent-400" aria-label="Drag your pick to another slot">
+      <DotsSixVertical size={18} />
+    </button>
+  ) : null;
+  return (
+    <div ref={setNodeRef} style={{ transform: CSS.Transform.toString(transform), transition, opacity: isDragging ? 0.7 : 1, zIndex: isDragging ? 2 : undefined, position: "relative" }}>
+      {children(handle)}
     </div>
   );
 }

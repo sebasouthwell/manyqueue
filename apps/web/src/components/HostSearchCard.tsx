@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Heart } from "@phosphor-icons/react";
 import { DEDICATION_MAX_LENGTH, type TrackResult } from "@manyqueue/shared";
 import { formatDuration } from "../lib/format";
+import { useRoomStore } from "../store/roomStore";
 
 type AddState = { kind: "idle" } | { kind: "adding" } | { kind: "added" } | { kind: "duplicate" };
 
@@ -15,6 +16,9 @@ export function HostSearchCard({ code, wide = false }: { code: string; wide?: bo
   const [dedicating, setDedicating] = useState<string | null>(null);
   const [dedications, setDedications] = useState<Record<string, string>>({});
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Rotation mode: the host has no turn of their own, so each add asks where the song goes.
+  const rotation = useRoomStore((s) => s.settings?.mode === "rotation");
+  const [placing, setPlacing] = useState<TrackResult | null>(null);
 
   useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current);
@@ -39,7 +43,7 @@ export function HostSearchCard({ code, wide = false }: { code: string; wide?: bo
     };
   }, [query, code]);
 
-  async function add(track: TrackResult) {
+  async function add(track: TrackResult, placement?: "next" | "house" | "pin") {
     setAddState((prev) => ({ ...prev, [track.uri]: { kind: "adding" } }));
     setAddError((prev) => ({ ...prev, [track.uri]: "" }));
     try {
@@ -53,12 +57,14 @@ export function HostSearchCard({ code, wide = false }: { code: string; wide?: bo
           albumArtUrl: track.albumArtUrl,
           durationMs: track.durationMs,
           dedication: dedications[track.uri]?.trim() || undefined,
+          placement,
         }),
       });
       if (!res.ok) {
         const body = await res.json().catch(() => null);
         setAddState((prev) => ({ ...prev, [track.uri]: { kind: "idle" } }));
         if (body?.error === "dedication_rejected") setAddError((prev) => ({ ...prev, [track.uri]: body.message }));
+        if (body?.error === "duplicate") setAddState((prev) => ({ ...prev, [track.uri]: { kind: "duplicate" } }));
         return;
       }
       const data = await res.json();
@@ -111,7 +117,7 @@ export function HostSearchCard({ code, wide = false }: { code: string; wide?: bo
                   <Heart size={15} weight={dedicationText ? "fill" : "regular"} />
                 </button>
                 <button
-                  onClick={() => add(track)}
+                  onClick={() => (rotation ? setPlacing(track) : add(track))}
                   disabled={state.kind !== "idle"}
                   className="whitespace-nowrap rounded-full border border-accent px-2.5 py-1 text-[11px] text-accent-100 disabled:opacity-60"
                 >
@@ -139,6 +145,60 @@ export function HostSearchCard({ code, wide = false }: { code: string; wide?: bo
             </div>
           );
         })}
+      </div>
+      {placing && (
+        <PlacementModal
+          track={placing}
+          onPick={(placement) => {
+            void add(placing, placement);
+            setPlacing(null);
+          }}
+          onClose={() => setPlacing(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+/** Rotation mode: where the host's song goes. Play next skips everyone's turn; a house pick waits for
+ * the next slot nobody has a song for, and plays before the fallback playlist. */
+function PlacementModal({ track, onPick, onClose }: { track: TrackResult; onPick: (p: "next" | "house" | "pin") => void; onClose: () => void }) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  return (
+    <div className="fixed inset-0 z-[80] flex items-end justify-center bg-black/60 sm:items-center sm:px-6" onClick={onClose}>
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="Where should this song go?"
+        onClick={(e) => e.stopPropagation()}
+        className="flex w-full max-w-sm flex-col gap-3 rounded-t-lg bg-panel p-5 ring-1 ring-panel-line sm:rounded-lg"
+      >
+        <div className="flex items-center gap-3">
+          {track.albumArtUrl ? <img src={track.albumArtUrl} alt="" className="h-12 w-12 rounded" /> : <div className="h-12 w-12 rounded bg-accent-800" />}
+          <div className="min-w-0 text-left">
+            <p className="truncate text-sm font-semibold text-accent-100">{track.name}</p>
+            <p className="truncate text-xs text-accent-300">{track.artistName}</p>
+          </div>
+        </div>
+        <button onClick={() => onPick("next")} className="flex flex-col items-start rounded-md border border-accent px-4 py-3 text-left">
+          <span className="text-sm font-semibold text-accent-100">⏭ Play next</span>
+          <span className="text-xs text-accent-300">Skips the queue: plays straight after the current song.</span>
+        </button>
+        <button onClick={() => onPick("house")} className="flex flex-col items-start rounded-md border border-panel-line px-4 py-3 text-left">
+          <span className="text-sm font-semibold text-accent-100">🏠 Next house pick</span>
+          <span className="text-xs text-accent-300">Plays when nobody has a song waiting, before the fallback playlist. Guests keep their turns.</span>
+        </button>
+        <button onClick={() => onPick("pin")} className="flex flex-col items-start rounded-md border border-panel-line px-4 py-3 text-left">
+          <span className="text-sm font-semibold text-accent-100">📍 Place in Coming up</span>
+          <span className="text-xs text-accent-300">Goes at the end of Coming up; drag it to any slot between guests' songs on the Queues board. It stays put while they reorder.</span>
+        </button>
+        <button onClick={onClose} className="py-1 text-xs text-accent-300">
+          Cancel
+        </button>
       </div>
     </div>
   );

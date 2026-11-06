@@ -76,7 +76,7 @@ export const guestRoutes: FastifyPluginAsync = async (app) => {
       const roomSettings = getRoomSettings(room.id);
 
       // A device that already joined this room (a valid guest cookie) is the same guest: joining again, from a double
-      // tap or a second tab, returns them instead of making "Seb 2", "Seb 3"...
+      // tap or a second tab, returns them instead of making "Sam 2", "Sam 3"...
       const existingId = getAuthenticatedGuestId(req);
       const existing = existingId ? getGuestById(existingId) : undefined;
       if (existing && existing.roomId === room.id && !existing.kickedAt) {

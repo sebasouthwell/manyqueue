@@ -20,6 +20,8 @@ import { getRoomSettings } from "../db/settings.js";
 import { getGuestById } from "../db/guests.js";
 import { getActiveQueueItems, getQueueItemById, isMystery, serializeQueue } from "../db/queue.js";
 import { getPoolEntry, listContestItems, listPoolEntries, removePoolEntry, serializePool, settleContest, type PoolEntry } from "../db/contest.js";
+import { leaveFight, settleFight } from "../db/fight.js";
+import { broadcastRotationState } from "./rotation-views.js";
 import { listOpenTimedVotes, type Vote } from "../db/votes.js";
 import { getIO } from "./io-instance.js";
 import { emitToGuest, emitToStaff, roomChannel } from "./socket-server.js";
@@ -193,10 +195,16 @@ function onContestClosed(vote: Vote, result: VoteResult, room: Room): void {
   if (gone.length > 0 || !result.winnerOptionId) {
     for (const e of entries) {
       if (e.entry && gone.includes(e)) {
+        if (getQueueItemById(e.queueItemId)?.status === "in_fight") {
+          const left = leaveFight(e.entry.id, "refund_reject");
+          if (left?.balance != null) tokenUpdate(io, room, e.enteredBy, left.balance, left.refunded, "refund_reject");
+          continue;
+        }
         const removed = removePoolEntry(e.entry.id, "refund_reject", getRoomSettings(room.id).tokenCap);
         if (removed?.balance != null) tokenUpdate(io, room, e.enteredBy, removed.balance, removed.item.paid, "refund_reject");
       }
     }
+    if (getRoomSettings(room.id).mode === "rotation") broadcastRotationState(io, room);
     endMoment(io, room, contestMomentId(vote.id));
     const cancelled: ToastPayload = { id: crypto.randomUUID(), message: "The song contest was cancelled", emoji: "🏆" };
     io.to(roomChannel(room.code)).emit(SOCKET_EVENTS.TOAST, cancelled);
@@ -207,20 +215,31 @@ function onContestClosed(vote: Vote, result: VoteResult, room: Room): void {
   const winner = entries.find((e) => e.entryId === result.winnerOptionId)!;
   const loser = entries.find((e) => e.entryId !== result.winnerOptionId)!;
   const settings = getRoomSettings(room.id);
-  const settled = settleContest({ winnerEntryId: winner.entryId, loserEntryId: loser.entryId, tokenCap: settings.tokenCap });
 
-  maybeApplyFairOrder(room);
-  maybeRecomputeApprovalLockAt(room);
-  io.to(roomChannel(room.code)).emit(SOCKET_EVENTS.QUEUE_UPDATE, serializeQueue(room.id));
+  if (getQueueItemById(winner.queueItemId)?.status === "in_fight") {
+    // Fight for a spot: straight on deck, and the winner keeps their turn (D10).
+    const fought = settleFight(winner.entryId, loser.entryId);
+    if (fought.winnerBalance !== null) tokenUpdate(io, room, winner.enteredBy, fought.winnerBalance, fought.winnerDelta, "refund_contest");
+    privateToast(io, room, winner.enteredBy, "⚔️ You won the fight! Your song's next, and you keep your turn", true);
+    privateToast(io, room, loser.enteredBy, "So close — your song's back in your queue");
+    io.to(roomChannel(room.code)).emit(SOCKET_EVENTS.QUEUE_UPDATE, serializeQueue(room.id));
+    broadcastRotationState(io, room);
+  } else {
+    const settled = settleContest({ winnerEntryId: winner.entryId, loserEntryId: loser.entryId, tokenCap: settings.tokenCap });
 
-  if (settled.winnerBalance !== null) tokenUpdate(io, room, winner.enteredBy, settled.winnerBalance, settled.winnerItem.paid || 1, "refund_contest");
-  privateToast(io, room, winner.enteredBy, "Your song won! Token refunded 🪙", true);
-  privateToast(
-    io,
-    room,
-    loser.enteredBy,
-    settled.loserJoinedQueue ? "So close — it's been added to the queue" : "So close — you'll get another shot",
-  );
+    maybeApplyFairOrder(room);
+    maybeRecomputeApprovalLockAt(room);
+    io.to(roomChannel(room.code)).emit(SOCKET_EVENTS.QUEUE_UPDATE, serializeQueue(room.id));
+
+    if (settled.winnerBalance !== null) tokenUpdate(io, room, winner.enteredBy, settled.winnerBalance, settled.winnerItem.paid || 1, "refund_contest");
+    privateToast(io, room, winner.enteredBy, "Your song won! Token refunded 🪙", true);
+    privateToast(
+      io,
+      room,
+      loser.enteredBy,
+      settled.loserJoinedQueue ? "So close — it's been added to the queue" : "So close — you'll get another shot",
+    );
+  }
 
   // The TV holds the result for 4s: winner grows, loser fades.
   const choices: TakeoverChoice[] = entries.map((e) => {
@@ -262,16 +281,21 @@ function onContestClosed(vote: Vote, result: VoteResult, room: Room): void {
   broadcastContestPool(io, room);
 }
 
+function isFightVote(vote: Vote): boolean {
+  return metaOf(vote).entries.some((e) => getQueueItemById(e.queueItemId)?.status === "in_fight");
+}
+
 /** Registers the contest rules with the shared vote engine. Call once at startup. */
 export function initContests(): void {
   registerVoteHandler("contest", {
+    // Shared mode's contest bars voting for your own song; a Rotation fight allows it (§18 row 32).
     decorate(vote, guestId, option) {
       const own = metaOf(vote).entries.find((e) => e.entryId === option.id)?.enteredBy === guestId;
-      return own ? { ...option, disabledReason: "Your song" } : option;
+      return own && !isFightVote(vote) ? { ...option, disabledReason: "Your song" } : option;
     },
     validateBallot(vote, guestId, optionId) {
       const own = metaOf(vote).entries.find((e) => e.entryId === optionId)?.enteredBy === guestId;
-      return own ? "Your song" : null;
+      return own && !isFightVote(vote) ? "Your song" : null;
     },
     summarize(vote, result) {
       const winner = (vote.options ?? []).find((o) => o.id === result.winnerOptionId);

@@ -1,6 +1,9 @@
-import { useEffect, useState } from "react";
-import { Star, Coin, Minus, Plus, CaretDown, SpeakerSlash, Megaphone, PencilSimple, Prohibit, Key, Lock, LockOpen } from "@phosphor-icons/react";
+import { useEffect, useRef, useState } from "react";
+import { Star, Coin, Minus, Plus, CaretDown, SpeakerSlash, Megaphone, PencilSimple, Prohibit, Key, Lock, LockOpen, EnvelopeSimple } from "@phosphor-icons/react";
 import {
+  HOST_NOTE_MAX,
+  ALL_PERMISSIONS,
+  GLITCH_PERMISSION,
   PERMISSIONS,
   PERMISSION_HINTS,
   PERMISSION_LABELS,
@@ -15,6 +18,7 @@ import { useRoomStore } from "../store/roomStore";
 import { useCan } from "../hooks/useCan";
 import { Emoji, EmojiText } from "./Emoji";
 import { Dialog } from "./Dialog";
+import { GlitchModal, glitchStatus } from "./GlitchModal";
 
 const REASON_CHIPS = ["💃 Won the dance-off", "🎤 Sang along", "🍕 Brought snacks"];
 
@@ -49,6 +53,7 @@ export function PeopleCard({
   }
   const holdsTokens = useCan("tokens");
   const holdsModeration = useCan("moderation");
+  const holdsGlitch = useCan("glitch");
   const canTokens = asHost || holdsTokens;
   const canModeration = asHost || holdsModeration;
   const [guests, setGuests] = useState<GuestSummary[]>([]);
@@ -61,6 +66,19 @@ export function PeopleCard({
   const [saving, setSaving] = useState(false);
   const [discreet, setDiscreet] = useState(false);
   const [renaming, setRenaming] = useState<GuestSummary | null>(null);
+  const [noting, setNoting] = useState<GuestSummary | null>(null);
+  const glitchMode = useRoomStore((s) => s.glitchMode);
+  // The host once glitch mode is unlocked; anyone else only with the secret glitch permission.
+  const canGlitch = asHost ? glitchMode : holdsGlitch;
+  const [glitching, setGlitching] = useState<GuestSummary | null>(null);
+  const refreshRef = useRef<() => void>(() => {});
+  // Glitch statuses change on the guests' phones (a timed one ends): keep the list fresh.
+  useEffect(() => {
+    if (!canGlitch) return;
+    const t = setInterval(() => refreshRef.current(), 10_000);
+    return () => clearInterval(t);
+  }, [canGlitch]);
+  const [noteDraft, setNoteDraft] = useState("");
   const [renameDraft, setRenameDraft] = useState("");
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [confirming, setConfirming] = useState<{ guest: GuestSummary; action: "mute" | "unmute" | "kick" } | null>(null);
@@ -142,6 +160,7 @@ export function PeopleCard({
       setLoading(false);
     }
   }
+  refreshRef.current = refresh;
 
   useEffect(() => {
     refresh();
@@ -177,7 +196,7 @@ export function PeopleCard({
 
   async function togglePerm(guest: GuestSummary, perm: Permission) {
     const next = guest.perms.includes(perm) ? guest.perms.filter((p) => p !== perm) : [...guest.perms, perm];
-    const ordered = PERMISSIONS.filter((p) => next.includes(p));
+    const ordered = ALL_PERMISSIONS.filter((p) => next.includes(p));
     setGuests((prev) => prev.map((g) => (g.id === guest.id ? { ...g, perms: ordered } : g)));
     const res = await fetch(`/rooms/${code}/guests/${guest.id}/perms`, {
       method: "POST",
@@ -199,6 +218,20 @@ export function PeopleCard({
       flash(await refusal(res));
       refresh();
     }
+  }
+
+  async function saveNote(message: string) {
+    const guest = noting;
+    if (!guest) return;
+    setNoting(null);
+    const res = await fetch(`/rooms/${code}/guests/${guest.id}/note`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message }),
+    }).catch(() => null);
+    if (!res?.ok) return flash("Couldn't save the note.");
+    flash(message.trim() ? `💌 ${guest.nickname} will see it next time they're on the app.` : "Note removed.");
+    refresh();
   }
 
   async function submitRename() {
@@ -370,7 +403,7 @@ export function PeopleCard({
         const isCohost = guest.role === "cohost";
         // A co-host (or anyone with Moderation) can't moderate a co-host or themselves; only the host can.
         const protectedTarget = !asHost && (isCohost || guest.id === selfId);
-        const expandable = asHost || (canModeration && !protectedTarget);
+        const expandable = asHost || (canModeration && !protectedTarget) || canGlitch;
         const expanded = expandedId === guest.id;
         return (
           <div key={guest.id} className="flex flex-col gap-1.5 rounded-md bg-bg p-2">
@@ -456,7 +489,45 @@ export function PeopleCard({
                     </button>
                   );
                 })}
-                {isCohost && <span className="text-[11px] text-accent-300">Co-hosts have every permission.</span>}
+                {isCohost && <span className="text-[11px] text-accent-300">Co-hosts have every permission{glitchMode ? " except glitch" : ""}.</span>}
+                {glitchMode && (
+                  <button
+                    onClick={() => togglePerm(guest, GLITCH_PERMISSION)}
+                    aria-pressed={guest.perms.includes(GLITCH_PERMISSION)}
+                    title={PERMISSION_HINTS.glitch}
+                    className="rounded-full border px-2.5 py-1 text-[11px] font-semibold"
+                    style={{
+                      borderColor: guest.perms.includes(GLITCH_PERMISSION) ? "#00ff9c" : "rgb(var(--color-accent-700))",
+                      background: guest.perms.includes(GLITCH_PERMISSION) ? "rgba(0,255,156,0.15)" : "transparent",
+                      color: guest.perms.includes(GLITCH_PERMISSION) ? "#00ff9c" : "rgb(var(--color-accent-300))",
+                    }}
+                  >
+                    {guest.perms.includes(GLITCH_PERMISSION) ? "✓ " : ""}
+                    {PERMISSION_LABELS.glitch}
+                  </button>
+                )}
+                <button
+                  onClick={() => {
+                    setNoteDraft(guest.hostNote ?? "");
+                    setNoting(guest);
+                  }}
+                  className="ml-auto flex items-center gap-1 rounded-full border border-accent-700 px-2.5 py-1 text-[11px] font-semibold text-accent-200"
+                  title="A private message they'll see next time they use the app"
+                >
+                  <EnvelopeSimple size={11} /> {guest.hostNote ? "Note waiting" : "Secret note"}
+                </button>
+              </div>
+            )}
+
+            {expanded && canGlitch && (
+              <div className="flex items-center gap-2 border-t border-[#00ff9c]/25 pt-1.5">
+                <span className="flex-1 truncate font-mono text-[11px] text-[#00ff9c]/80">{glitchStatus(guest.glitch)}</span>
+                <button
+                  onClick={() => setGlitching(guest)}
+                  className="rounded-full border border-[#00ff9c]/60 px-2.5 py-1 text-[11px] font-semibold text-[#00ff9c]"
+                >
+                  🌀 Glitch…
+                </button>
               </div>
             )}
 
@@ -494,6 +565,40 @@ export function PeopleCard({
           </div>
         );
       })}
+
+      {glitching && (
+        <GlitchModal
+          code={code}
+          guest={guests.find((g) => g.id === glitching.id) ?? glitching}
+          onClose={() => setGlitching(null)}
+          onSaved={refresh}
+        />
+      )}
+
+      {noting && (
+        <Dialog
+          title={`Secret note for ${noting.nickname}`}
+          body={
+            <div className="flex flex-col gap-1.5 text-left">
+              <textarea
+                value={noteDraft}
+                onChange={(e) => setNoteDraft(e.target.value.slice(0, HOST_NOTE_MAX))}
+                maxLength={HOST_NOTE_MAX}
+                rows={4}
+                placeholder="Only they will see this, the next time they use the app."
+                className="w-full resize-none rounded-md bg-bg px-3 py-2 text-sm text-accent-100 outline-none"
+              />
+              <span className="self-end text-[10px] tabular-nums text-accent-300">
+                {noteDraft.length}/{HOST_NOTE_MAX}
+              </span>
+            </div>
+          }
+          primaryLabel={noteDraft.trim() ? "Leave note" : noting.hostNote ? "Remove note" : "Close"}
+          onPrimary={() => (noteDraft.trim() || noting.hostNote ? saveNote(noteDraft) : setNoting(null))}
+          secondaryLabel="Cancel"
+          onSecondary={() => setNoting(null)}
+        />
+      )}
 
       {renaming && (
         <Dialog

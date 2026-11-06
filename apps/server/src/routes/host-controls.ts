@@ -16,7 +16,7 @@ import {
 import { getRoomSettings } from "../db/settings.js";
 import { apply, TokenCapExceededError, InsufficientTokensError } from "../db/tokens.js";
 import { getGuestById } from "../db/guests.js";
-import { applyLocalPlaybackChange, pokePlayerLoop } from "../realtime/player-loop.js";
+import { applyLocalPlaybackChange, pokePlayerLoop, forgetRemovedItem } from "../realtime/player-loop.js";
 import { pausePlayback, resumePlayback, setPlaybackVolume } from "../spotify.js";
 import { updateRoomVolume } from "../realtime/volume.js";
 import { forceSkipCurrent } from "../realtime/playback-control.js";
@@ -26,6 +26,7 @@ import { maybePayPassiveIncome } from "../realtime/passive-income.js";
 import { maybeApplyFairOrder, maybeRecomputeApprovalLockAt } from "../realtime/queue-recompute.js";
 import { announceDedication, endMoment, dedicationMomentId } from "../realtime/moments.js";
 import { recordAction, broadcastAction } from "../realtime/action-log-broadcast.js";
+import { broadcastRotationState } from "../realtime/rotation-views.js";
 
 export const hostControlRoutes: FastifyPluginAsync = async (app) => {
   // Hosts and co-hosts can hide (or restore) a dedication from the track panel
@@ -140,6 +141,7 @@ export const hostControlRoutes: FastifyPluginAsync = async (app) => {
 
       const removed = removeQueuedItem(req.params.itemId);
       if (!removed) return reply.code(400).send({ error: "cannot_remove" });
+      forgetRemovedItem(room.code, removed.id);
 
       recordAction(getIO(), room, {
         actor: actor.hostId ?? actor.guestId!,
@@ -173,6 +175,7 @@ export const hostControlRoutes: FastifyPluginAsync = async (app) => {
       maybeApplyFairOrder(room);
       maybeRecomputeApprovalLockAt(room);
       getIO().to(roomChannel(room.code)).emit(SOCKET_EVENTS.QUEUE_UPDATE, serializeQueue(room.id));
+      if (removed.status === "house") broadcastRotationState(getIO(), room);
       maybePayPassiveIncome(getIO(), room);
       return { ok: true };
     },

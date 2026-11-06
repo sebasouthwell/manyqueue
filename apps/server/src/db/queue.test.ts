@@ -90,7 +90,7 @@ describe("addQueueItem", () => {
     expect(item.dedication).toBe("For Sam 🎂");
     expect(item.paid).toBe(0);
     expect(item.addedBy).toBeNull();
-    expect(history(item.addedBy ?? "guest-1")).toHaveLength(0); // nothing charged: no guest to charge
+    expect(history(item.addedBy ?? "guest-1", db)).toHaveLength(0); // nothing charged: no guest to charge
   });
 
   it("defaults to no dedication when none is given", () => {

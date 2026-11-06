@@ -14,7 +14,7 @@ import {
 } from "../db/rooms.js";
 import { getPlayedItemsInOrder, getActiveQueueItems, refundQueueItem } from "../db/queue.js";
 import { listPoolEntries, removePoolEntry } from "../db/contest.js";
-import { getRoomSettings } from "../db/settings.js";
+import { getRoomSettings, updateRoomSettings } from "../db/settings.js";
 import { SpotifyAuthError, SpotifyQuotaError, listDevices, transferPlayback, createPlaylist, addTracksToPlaylist } from "../spotify.js";
 import { startPlayerLoop, stopPlayerLoop } from "../realtime/player-loop.js";
 import { runNightEndBatch } from "../realtime/ai-nicknames.js";
@@ -62,11 +62,19 @@ async function exportNightPlaylist(room: Room, hostId: string, uris: string[]): 
 }
 
 export const roomRoutes: FastifyPluginAsync = async (app) => {
-  app.post("/rooms", async (req, reply) => {
+  // Starting a night: the host picks how the queue works first (Shared or Rotation). An already-active
+  // room is returned untouched; the mode only applies to a room created by this call.
+  app.post<{ Body: { mode?: "shared" | "rotation" } }>("/rooms", async (req, reply) => {
     const host = getAuthenticatedHost(req);
     if (!host) return reply.code(401).send({ error: "not_logged_in" });
 
+    const existed = !!getActiveRoomForHost(host.id);
     const room = getOrCreateActiveRoomForHost(host);
+    const mode = req.body?.mode;
+    if (!existed && (mode === "shared" || mode === "rotation")) {
+      // Rotation runs without tokens by default (everyone simply takes turns), same as switching to it.
+      updateRoomSettings(room.id, mode === "rotation" ? { mode, tokenMode: false } : { mode });
+    }
     return { room: serializeRoom(room) };
   });
 

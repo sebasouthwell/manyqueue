@@ -2,6 +2,7 @@ import { DotsSixVertical, DotsThree } from "@phosphor-icons/react";
 import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import type { MineQueueItemView } from "@manyqueue/shared";
+import { HatCover } from "./Holiday";
 
 /** One draggable row in the Mine tab (mockup 4a's dots-six-vertical handle). Only the handle starts a
  * drag — the rest of the row stays tappable (the "…" action sheet, eventually a preview). */
@@ -29,7 +30,7 @@ export function SortableMineRow({ item, onOpenActions }: { item: MineQueueItemVi
         <DotsSixVertical size={18} />
       </button>
       {item.albumArtUrl ? (
-        <img src={item.albumArtUrl} alt="" className="h-11 w-11 rounded" />
+        <HatCover trackName={item.trackName} size={44}><img src={item.albumArtUrl} alt="" className="h-11 w-11 rounded" /></HatCover>
       ) : (
         <div className="h-11 w-11 rounded bg-accent-800" />
       )}

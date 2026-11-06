@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import { createTestDb, seedRoomWithGuest } from "./test-helpers.js";
 import { addQueueItem, getQueueItemById } from "./queue.js";
 import { apply, balance } from "./tokens.js";
@@ -18,6 +18,8 @@ import {
   draftRandomGuest,
   setGuestWeight,
   nextMinePosition,
+  placeHostSong,
+  getHouseItems,
 } from "./rotation.js";
 import { getOnDeckItems } from "./queue.js";
 import { updateRoomSettings } from "./settings.js";
@@ -87,14 +89,17 @@ describe("switchRoomMode: shared -> rotation", () => {
     expect(after.minePosition).toBeNull();
   });
 
-  it("an ownerless leftover (e.g. an unplayed house pick) also goes to the pool, not lost", () => {
+  it("the host's own song (ownerless, not a mystery) becomes a house pick, not a mystery-pool entry", () => {
     const db = createTestDb();
     seedRoomWithGuest(db);
     const item = addItem(db, null, "house-track");
 
     switchRoomMode("room-1", "rotation", db);
     const after = getQueueItemById(item.id, db)!;
-    expect(after.status).toBe("pool");
+    expect(after.status).toBe("house");
+    // ...and back in Shared mode it's an ordinary queued song again.
+    switchRoomMode("room-1", "shared", db);
+    expect(getQueueItemById(item.id, db)!.status).toBe("queued");
   });
 
   it("a kicked guest doesn't get a rotation row", () => {
@@ -422,5 +427,71 @@ describe("getRotationRoster order", () => {
     ensureRotationState("room-1", "aa-second", db);
     const ids = getRotationRoster("room-1", db).map((r) => r.guestId);
     expect(ids.indexOf("zz-first")).toBeLessThan(ids.indexOf("aa-second"));
+  });
+});
+
+describe("reorderMineQueue (guest or host)", () => {
+  it("applies an exact reordering of the guest's queue, and rejects anything else", async () => {
+    const { createTestDb, seedRoomWithGuest } = await import("./test-helpers.js");
+    const { addQueueItem } = await import("./queue.js");
+    const { reorderMineQueue, getMineQueue } = await import("./rotation.js");
+    const { queueItems } = await import("./schema.js");
+    const { eq } = await import("drizzle-orm");
+    const db = createTestDb();
+    seedRoomWithGuest(db);
+    const ids = [0, 1, 2].map((i) => {
+      const item = addQueueItem(
+        { roomId: "room-1", trackUri: `t${i}`, trackName: `t${i}`, artistName: "A", albumArtUrl: null, durationMs: 1000, addedBy: "guest-1" },
+        db,
+      );
+      db.update(queueItems).set({ status: "mine", minePosition: i }).where(eq(queueItems.id, item.id)).run();
+      return item.id;
+    });
+    expect(reorderMineQueue("room-1", "guest-1", [ids[2], ids[0], ids[1]], db)).toBe(true);
+    expect(getMineQueue("room-1", "guest-1", db).map((m) => m.id)).toEqual([ids[2], ids[0], ids[1]]);
+    expect(reorderMineQueue("room-1", "guest-1", [ids[0], ids[1]], db)).toBe(false); // missing one
+    expect(reorderMineQueue("room-1", "guest-1", [ids[0], ids[0], ids[1]], db)).toBe(false); // duplicate
+    expect(reorderMineQueue("room-1", "guest-1", "nope", db)).toBe(false);
+  });
+});
+
+describe("placeHostSong (Rotation mode host adds)", () => {
+  it("house: waits in the host's list, in the order added", () => {
+    const db = createTestDb();
+    seedRoomWithGuest(db);
+    const a = addItem(db, null, "host-a");
+    const b = addItem(db, null, "host-b");
+    placeHostSong("room-1", a.id, "house", db);
+    placeHostSong("room-1", b.id, "house", db);
+    expect(getHouseItems("room-1", db).map((h) => h.trackUri)).toEqual(["host-a", "host-b"]);
+  });
+
+  it("next: goes on deck straight after the playing song, ahead of anything already waiting", () => {
+    const db = createTestDb();
+    seedRoomWithGuest(db);
+    const playing = addItem(db, "guest-1", "playing");
+    const waiting = addItem(db, "guest-1", "waiting");
+    db.update(queueItems).set({ status: "playing", position: 1 }).where(eq(queueItems.id, playing.id)).run();
+    db.update(queueItems).set({ status: "on_deck", position: 2 }).where(eq(queueItems.id, waiting.id)).run();
+    const host = addItem(db, null, "host-next");
+    placeHostSong("room-1", host.id, "next", db);
+    const order = db.select().from(queueItems).where(inArray(queueItems.status, ["playing", "on_deck"])).orderBy(queueItems.position).all();
+    expect(order.map((o) => o.trackUri)).toEqual(["playing", "host-next", "waiting"]);
+  });
+
+  it("house: replaces a fallback track that's up next", () => {
+    const db = createTestDb();
+    seedRoomWithGuest(db);
+    const fallback = addQueueItem(
+      { roomId: "room-1", trackUri: "fallback", trackName: "f", artistName: "A", albumArtUrl: null, durationMs: 1, addedBy: null, source: "fallback" },
+      db,
+    );
+    db.update(queueItems).set({ status: "on_deck", position: 1 }).where(eq(queueItems.id, fallback.id)).run();
+    const host = addItem(db, null, "host-song");
+    placeHostSong("room-1", host.id, "house", db);
+    expect(getQueueItemById(fallback.id, db)).toBeUndefined();
+    const after = getQueueItemById(host.id, db)!;
+    expect(after.status).toBe("on_deck");
+    expect(after.draftedBy).toBe("house");
   });
 });

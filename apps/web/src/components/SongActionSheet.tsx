@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { EnvelopeSimpleOpen, Detective, ArrowLineUp, Trash } from "@phosphor-icons/react";
+import { EnvelopeSimpleOpen, Detective, ArrowLineUp, Trash, Sword } from "@phosphor-icons/react";
 import type { MineQueueItemView } from "@manyqueue/shared";
 import { Sheet } from "./Sheet";
 import { useRoomStore } from "../store/roomStore";
@@ -10,17 +10,19 @@ interface Props {
   onClose: () => void;
 }
 
-/** The song action sheet (the Rotation-mode design §11, mockup 4b): dedicate, mystery pool, move to top,
- * remove. Fight for a spot isn't here yet — it needs its own pass on the shared contest engine to
- * resolve into "straight on deck, free turn" instead of Shared mode's "front of the queue". */
+/** The song action sheet (the Rotation-mode design §11, mockup 4b): dedicate, mystery pool, fight for a spot,
+ * move to top, remove. */
 export function SongActionSheet({ code, item, onClose }: Props) {
   const mine = useRoomStore((s) => s.mine);
   const tokenMode = useRoomStore((s) => s.settings?.tokenMode ?? true);
+  const fightsOn = useRoomStore((s) => s.settings?.mode === "rotation" && s.settings.nextSongMethod === "rotation" && s.settings.fights);
+  const alreadyFighting = mine.some((m) => m.inFight);
+  const [error, setError] = useState<string | null>(null);
   const [editingDedication, setEditingDedication] = useState(false);
   const [text, setText] = useState(item.dedication ?? "");
   const [busy, setBusy] = useState(false);
 
-  const ordered = mine.filter((m) => !m.inPool);
+  const ordered = mine.filter((m) => !m.inPool && !m.inFight);
   const isTop = ordered[0]?.id === item.id;
 
   async function saveDedication() {
@@ -49,6 +51,16 @@ export function SongActionSheet({ code, item, onClose }: Props) {
       setBusy(false);
       onClose();
     }
+  }
+
+  async function fight() {
+    setBusy(true);
+    setError(null);
+    const res = await fetch(`/rooms/${code}/mine/${item.id}/fight`, { method: "POST" }).catch(() => null);
+    setBusy(false);
+    if (res?.ok) return onClose();
+    const j = res ? ((await res.json().catch(() => null)) as { message?: string } | null) : null;
+    setError(j?.message ?? "Couldn't enter the fight — try again.");
   }
 
   async function moveToTop() {
@@ -128,6 +140,24 @@ export function SongActionSheet({ code, item, onClose }: Props) {
           </div>
           <span className="text-xs text-accent-300">{tokenMode ? "2 🪙" : "Free"}</span>
         </button>
+
+        {fightsOn && (
+          <button
+            disabled={busy || alreadyFighting}
+            onClick={fight}
+            className="flex items-center gap-3 rounded-md px-2 py-3 text-left disabled:opacity-40"
+          >
+            <Sword size={20} className="text-accent-300" />
+            <div className="min-w-0 flex-1">
+              <p className="text-accent-100">Fight for a spot</p>
+              <p className="text-xs text-accent-300">
+                {alreadyFighting ? "You already have a song in a fight" : "1-on-1 vote: the winner plays next and you keep your turn"}
+              </p>
+            </div>
+            <span className="text-xs text-accent-300">{tokenMode ? "1 🪙 · back if you win" : "Free"}</span>
+          </button>
+        )}
+        {error && <p className="px-2 text-xs text-accent-200">{error}</p>}
 
         <button
           disabled={busy || isTop}

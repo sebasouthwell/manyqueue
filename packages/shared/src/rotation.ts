@@ -13,6 +13,8 @@ export interface MineQueueItemView {
   dedication: string | null;
   /** In the mystery pool, not this guest's ordered queue — shown separately in the sheet. */
   inPool: boolean;
+  /** Up for a fight (Fight for a spot): out of the rotation until it wins or comes back. */
+  inFight?: boolean;
 }
 
 /** One on-deck slot, everyone's view. */
@@ -21,6 +23,7 @@ export interface OnDeckItemView {
   trackName: string;
   artistName: string;
   albumArtUrl: string | null;
+  albumName?: string | null;
   durationMs: number;
   /** Null for a mystery pick or a house pick — nobody's name goes with those. */
   addedBy: { nickname: string; emoji: string } | null;
@@ -78,9 +81,14 @@ export interface RotationGuestView {
  * changed. No titles: personal queue titles stay with their owner and the host (§12). A guest's own
  * slots come in their queue order, so their client can put titles on those itself. */
 export interface UpcomingItemView {
-  kind: "guest" | "mystery" | "house";
+  kind: "guest" | "mystery" | "house" | "host";
   guestId: string | null;
   addedBy: { nickname: string; emoji: string } | null;
+  /** The song itself, for guest slots, when the room shows what's coming up (showUpcomingSongs). Never
+   * for mystery slots. */
+  trackName?: string | null;
+  artistName?: string | null;
+  albumArtUrl?: string | null;
 }
 
 export interface RotationRoomView {
@@ -98,6 +106,12 @@ export interface HostUpcomingItemView extends UpcomingItemView {
   trackName: string | null;
   albumArtUrl: string | null;
   artistName: string | null;
+}
+
+/** A host song pinned to a slot in Coming up (dragged there on the host board). */
+export interface HostPinnedSongView extends HostPoolSongView {
+  /** Its slot in Coming up (0 = the next one drafted). */
+  slot: number;
 }
 
 /** One song in the host board's per-guest column — titles the general rotation:update never carries. */
@@ -137,6 +151,10 @@ export interface HostRotationBoardView {
   onDeck: OnDeckItemView[];
   guests: HostRotationGuestView[];
   pool: HostPoolSongView[];
+  /** The host's own songs waiting for a house pick (Rotation mode host adds), in order. */
+  house: HostPoolSongView[];
+  /** The host's songs pinned to a slot in Coming up. */
+  pinned: HostPinnedSongView[];
   upcoming: HostUpcomingItemView[];
   ballot: HostBallotView | null;
   /** Auto + veto (§9): the song rotation drafts when this countdown ends, while the host can still
@@ -158,33 +176,99 @@ export interface MyWeightPayload {
 export const TURN_WEIGHTS = [0.5, 0.75, 1, 1.5, 2, 3] as const;
 
 /**
- * Rotation order's fairness rule (§8). Credit is "how far up the line you are": highest goes next, and a
- * turn costs 1/weight, so a ×2 guest gets twice the turns of a ×1 guest and, at ×1, the next turn goes to
- * whoever has had the fewest, ties to whoever waited longest — §5's promise. A guest joining mid-party
- * starts level with the most-served guest (ensureRotationState on the server), i.e. at the end of the line.
+ * Rotation order's fairness rule (§8): turns come in **rounds**. A round is every ×1 guest once; a guest's
+ * weight is how many turns they get per round (×2 = two, ×1.5 = one then two, ×0.5 = every other round).
+ * `credit` is the turns a guest has left in the current round (whole turns plus a carried fraction).
  *
- * This replaced textbook smooth weighted round-robin (+weight to everyone, -total to the winner). That
- * one is only fair while the set of guests never changes, and in a party it changes constantly: a
- * draft charged "total weight" while Cris was still in cost Ana and Ben a point more than everyone
- * charged after Cris's one song was gone, so they went to the back of round 2 (seen live: Ana waited
- * 18 songs while Dani had 3). Here a turn's cost depends only on the guest's own weight, so people
- * coming and going can't move anyone else's place.
+ * - A new round starts when no guest with songs has a whole turn left: everyone active gets their weight
+ *   added to the fraction they carried. Unused whole turns don't carry (an empty or broke guest can't
+ *   bank a backlog), but a debt does (a host draft took a turn they didn't have yet).
+ * - Inside a round, turn order is whoever waited longest. A boosted guest's extra turns are either played
+ *   back to back with their normal one (`together`, the default) or spaced out (`spread`).
+ * - A guest joining mid-party starts with no turns left this round: the end of the line.
+ * - The host changing a weight adds the difference to this round straight away (setGuestWeight), so the
+ *   main queue reshapes the moment it changes.
  *
- * The one clamp (mutates the credit of the guests eligible for this slot): nobody is more than one turn
- * ahead of the most-served eligible guest. A guest back from an empty queue or from being inactive keeps
- * their place (one prompt turn) but can't cash in a backlog of turns in a row (§5 rules 3 and 5). Guests
- * who stayed in the whole time are never touched by it: their credits never spread wider than one turn.
+ * This replaced a credit model where a turn cost 1/weight and the most-owed guest went next: the long-run
+ * rate was right, but a weight change barely moved the next ten songs and ×3 could come out as four turns
+ * in a row.
  */
-export function clampTurnCredit<T extends { credit: number; weight: number }>(eligible: T[]): void {
-  if (eligible.length === 0) return;
-  const mostServed = Math.min(...eligible.map((g) => g.credit));
-  const ceiling = mostServed + Math.max(...eligible.map((g) => turnCost(g.weight)));
-  for (const g of eligible) if (g.credit > ceiling) g.credit = ceiling;
+export type BoostedTurns = "together" | "spread";
+
+const WHOLE_TURN = 1 - 1e-9;
+
+/**
+ * A host weight change, applied to this round (§8): the difference in turns per round is added to the
+ * turns left, so the main queue reshapes at once. A raise that gives them a turn now puts it next (their
+ * wait is treated as the longest), which is what the host expects to see. Lowering a weight never takes
+ * them below zero turns, or deeper into a debt they already had.
+ */
+export function applyWeightChange<T extends { weight: number; credit: number; lastTurnAt: number | null }>(
+  g: T,
+  weight: number,
+): Pick<T, "weight" | "credit" | "lastTurnAt"> {
+  const delta = weight - g.weight;
+  if (delta < 0) return { weight, credit: Math.max(Math.min(g.credit, 0), g.credit + delta), lastTurnAt: g.lastTurnAt };
+  const credit = g.credit + delta;
+  const gainsTurnNow = g.credit < WHOLE_TURN && credit >= WHOLE_TURN;
+  return { weight, credit, lastTurnAt: gainsTurnNow ? -1 : g.lastTurnAt };
 }
 
-/** What one turn costs a guest's credit (see clampTurnCredit). */
-export function turnCost(weight: number): number {
-  return 1 / weight;
+/** Starts a new round for these guests (mutates). */
+export function startRound<T extends { credit: number; weight: number }>(guests: T[]): void {
+  for (const g of guests) g.credit = (g.credit < 0 ? g.credit : g.credit % 1) + g.weight;
+}
+
+interface TurnGuest {
+  id: string;
+  credit: number;
+  weight: number;
+  lastTurnAt: number | null;
+  joinedAt: number;
+  active: boolean;
+  queue: unknown[];
+}
+
+/** Never had a turn counts as waiting since the epoch; a raised weight's extra turn (-1) goes before even that. */
+const byLongestWait = (a: TurnGuest, b: TurnGuest) => (a.lastTurnAt ?? 0) - (b.lastTurnAt ?? 0) || a.joinedAt - b.joinedAt;
+
+/** Starts new rounds (mutating `guests`) until a guest with songs has a whole turn left. False when no
+ * active guest has songs at all. */
+export function ensureRound<T extends TurnGuest>(guests: T[]): boolean {
+  const eligible = guests.filter((g) => g.active && g.queue.length > 0);
+  if (eligible.length === 0) return false;
+  // Weights are at least ×0.5, so two rounds always give someone a whole turn; 4 is just a safe bound.
+  for (let i = 0; i < 4 && !eligible.some((g) => g.credit >= WHOLE_TURN); i++) startRound(guests.filter((g) => g.active));
+  return true;
+}
+
+/**
+ * Who goes next, in order of preference (the caller takes the first who can pay), among guests with songs
+ * and a whole turn left this round. `freshRound` = a round started since the last turn was taken, so a
+ * back-to-back pair never straddles two rounds.
+ */
+export function turnCandidates<T extends TurnGuest>(guests: T[], mode: BoostedTurns, freshRound: boolean): T[] {
+  const owed = guests.filter((g) => g.active && g.queue.length > 0 && g.credit >= WHOLE_TURN).sort(byLongestWait);
+  const latest = guests.reduce<T | null>((m, g) => (g.lastTurnAt !== null && (m === null || g.lastTurnAt > (m.lastTurnAt ?? -Infinity)) ? g : m), null);
+  if (mode === "together") {
+    if (!freshRound && latest && owed.includes(latest)) return [latest, ...owed.filter((g) => g !== latest)];
+    return owed;
+  }
+  // Spread: most turns left first, never the same guest twice running while someone else is owed.
+  const sorted = [...owed].sort((a, b) => Math.floor(b.credit + 1e-9) - Math.floor(a.credit + 1e-9) || byLongestWait(a, b));
+  if (latest && sorted.length > 1 && sorted[0] === latest) return [...sorted.slice(1), latest];
+  return sorted;
+}
+
+/** Everyone with songs, in the order their turns come: owed this round first (as turnCandidates), then
+ * the rest as the next round would order them. For "how many turns until yours" and Crowd pick's ballot. */
+export function rotationOrder<T extends TurnGuest>(guests: T[], mode: BoostedTurns = "together"): T[] {
+  const eligible = guests.filter((g) => g.active && g.queue.length > 0);
+  const owed = turnCandidates(eligible, mode, false);
+  const rest = eligible.filter((g) => !owed.includes(g));
+  const nextRound = (g: T) => (g.credit < 0 ? g.credit : g.credit % 1) + g.weight;
+  rest.sort((a, b) => nextRound(b) - nextRound(a) || byLongestWait(a, b));
+  return [...owed, ...rest];
 }
 
 /** How many songs on deck at once — scales with the room instead of being a
@@ -261,6 +345,8 @@ export interface DraftRoomState {
   housePick: () => DraftedSong;
   /** Injectable for deterministic tests; defaults to Math.random. */
   rng?: () => number;
+  /** Where a boosted guest's extra turns go in a round (room setting); default back to back. */
+  boostedTurns?: BoostedTurns;
 }
 
 export interface DraftResult {
@@ -277,20 +363,55 @@ export interface DraftResult {
  * loop's own choice (credit order, first guest who can pay), on a scratch copy. */
 function placeableGuestSongs(state: DraftRoomState, max: number): number {
   const guests = state.guests.map((g) => ({ ...g, queue: [...g.queue] }));
+  const mode = state.boostedTurns ?? "together";
   let placed = 0;
+  let fresh = false;
+  let stamp = 0;
   while (placed < max) {
-    const eligible = guests.filter((g) => g.active && g.queue.length > 0);
-    clampTurnCredit(eligible);
-    const payer = eligible
-      .sort((a, b) => b.credit - a.credit)
-      .find((g) => state.onHouseDefault || g.tokenBalance >= priceOf(g.queue[0], state.replaySurcharge, state.tokenMode));
+    const turn = nextPayableTurn(guests, state, mode, fresh);
+    const payer = turn.guest;
     if (!payer) break;
     payer.tokenBalance -= priceOf(payer.queue[0], state.replaySurcharge, state.tokenMode);
     payer.queue = payer.queue.slice(1);
-    payer.credit -= turnCost(payer.weight);
+    payer.credit -= 1;
+    payer.lastTurnAt = Number.MAX_SAFE_INTEGER - 1000 + stamp++;
     placed++;
   }
   return placed;
+}
+
+/**
+ * The next guest whose turn it is and who can pay (or everyone, with onHouseDefault), starting a new round
+ * when needed. Guests passed over for tokens this round are listed; if nobody owed this round can pay, a
+ * new round starts once (the broke guests lose that turn, §5.2 rule 4) and it looks again.
+ */
+function nextPayableTurn(
+  guests: RotationGuest[],
+  state: DraftRoomState,
+  mode: BoostedTurns,
+  freshRound: boolean,
+): { guest: RotationGuest; freshRound: boolean; passedOver: TurnSkippedNotification[] } | { guest: null; freshRound: boolean; passedOver: TurnSkippedNotification[]; first: RotationGuest | null } {
+  const passedOver: TurnSkippedNotification[] = [];
+  let fresh = freshRound;
+  let first: RotationGuest | null = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const before = guests.map((g) => g.credit);
+    if (!ensureRound(guests)) return { guest: null, freshRound: fresh, passedOver, first };
+    if (guests.some((g, i) => g.credit !== before[i])) fresh = true;
+    const candidates = turnCandidates(guests, mode, fresh);
+    first ??= candidates[0] ?? null;
+    for (const g of candidates) {
+      const price = priceOf(g.queue[0], state.replaySurcharge, state.tokenMode);
+      if (state.onHouseDefault || g.tokenBalance >= price) return { guest: g, freshRound: fresh, passedOver };
+      if (!passedOver.some((n) => n.guestId === g.id)) passedOver.push({ guestId: g.id, reason: "turn_skipped", tokensNeeded: price - g.tokenBalance });
+    }
+    // Nobody owed this round can pay: the next round, once.
+    if (attempt === 0) {
+      startRound(guests.filter((g) => g.active));
+      fresh = true;
+    }
+  }
+  return { guest: null, freshRound: fresh, passedOver, first };
 }
 
 function priceOf(song: RotationSong, replaySurcharge: number, tokenMode: boolean): number {
@@ -323,6 +444,9 @@ export function draft(state: DraftRoomState, now = Date.now()): DraftResult {
   let mysteryCounter = state.mysteryCounter;
   const guests = state.guests.map((g) => ({ ...g, queue: [...g.queue] }));
   const notifications: TurnSkippedNotification[] = [];
+  const mode = state.boostedTurns ?? "together";
+  let freshRound = false;
+  let stamp = 0;
 
   // House picks are filler for when nobody has a song. Once guests do, the ones that haven't started
   // give their slots back, newest first; otherwise a room that filled up with house music while
@@ -352,40 +476,25 @@ export function draft(state: DraftRoomState, now = Date.now()): DraftResult {
       continue;
     }
 
-    const eligible = guests.filter((g) => g.active && g.queue.length > 0);
-    clampTurnCredit(eligible);
-
-    const sorted = [...eligible].sort((a, b) => {
-      if (b.credit !== a.credit) return b.credit - a.credit;
-      const aLast = a.lastTurnAt ?? -Infinity;
-      const bLast = b.lastTurnAt ?? -Infinity;
-      if (aLast !== bLast) return aLast - bLast;
-      return a.joinedAt - b.joinedAt;
-    });
-
     const take = (g: RotationGuest, onHouse: boolean) => {
       const song = g.queue[0];
       const price = priceOf(song, state.replaySurcharge, state.tokenMode);
       const chargedTokens = onHouse ? 0 : Math.min(price, g.tokenBalance);
       g.tokenBalance -= chargedTokens;
       g.queue = g.queue.slice(1);
-      g.credit -= turnCost(g.weight);
-      g.lastTurnAt = now;
+      g.credit -= 1;
+      // Strictly increasing within one call, so "who went last" is right for the forecast too.
+      g.lastTurnAt = now + stamp++;
+      freshRound = false;
       onDeck.push({ itemId: song.id, ownerId: g.id, isMystery: false, isHousePick: false, chargedTokens });
     };
 
-    let placed = false;
-    const skippedThisSlot: TurnSkippedNotification[] = [];
-    for (const g of sorted) {
-      const price = priceOf(g.queue[0], state.replaySurcharge, state.tokenMode);
-      if (g.tokenBalance >= price || state.onHouseDefault) {
-        take(g, false);
-        placed = true;
-        break;
-      }
-      skippedThisSlot.push({ guestId: g.id, reason: "turn_skipped", tokensNeeded: price - g.tokenBalance });
-    }
-    if (!placed) {
+    const turn = nextPayableTurn(guests, state, mode, freshRound);
+    freshRound = turn.freshRound;
+    const skippedThisSlot = turn.passedOver.filter((n) => n.guestId !== turn.guest?.id);
+    if (turn.guest) {
+      take(turn.guest, false);
+    } else {
       let house: DraftedSong | null = null;
       try {
         house = state.housePick();
@@ -396,9 +505,10 @@ export function draft(state: DraftRoomState, now = Date.now()): DraftResult {
         // could ever earn their way out of.
         // No "turn skipped" toasts here: nothing took this slot from anyone, it's just left open.
         if (onDeck.length > 0) break;
-        if (sorted.length === 0) throw err;
-        take(sorted[0], true);
-        notifications.push(...skippedThisSlot.filter((n) => n.guestId !== sorted[0].id));
+        const first = "first" in turn ? turn.first : null;
+        if (!first) throw err;
+        take(first, true);
+        notifications.push(...skippedThisSlot.filter((n) => n.guestId !== first.id));
         mysteryCounter += 1;
         continue;
       }
@@ -439,24 +549,12 @@ export interface OpenBallotResult {
   ballot: BallotCandidate[];
 }
 
-/** Called once per round, when the ballot opens. Admission is rotation order's own ranking (D12): the
- * highest credit (fewest turns for your weight, with the same catch-up clamp as draft()) gets on, ties to
- * whoever waited longest. Credit only moves when a song is actually drafted (closeBallot), exactly as in
- * draft(), so the two "Next song" methods can't drift apart. `guests` comes back as an unchanged copy. */
+/** Called when the ballot opens. Admission is rotation order's own ranking (D12, rotationOrder): guests
+ * still owed a turn this round first, so a ×2 guest reaches twice as many ballots. Turns only move when a
+ * song is actually drafted (closeBallot), as in draft(). `guests` comes back as an unchanged copy. */
 export function openBallot(guests: CrowdPickGuest[], ballotSize: number, wildcardAfter: number): OpenBallotResult {
   const next = guests.map((g) => ({ ...g, queue: [...g.queue] }));
-  const eligible = next.filter((g) => g.active && g.queue.length > 0).map((g) => ({ ...g }));
-  clampTurnCredit(eligible);
-
-  const sorted = [...eligible].sort((a, b) => {
-    if (b.credit !== a.credit) return b.credit - a.credit;
-    const aLast = a.lastTurnAt ?? -Infinity;
-    const bLast = b.lastTurnAt ?? -Infinity;
-    if (aLast !== bLast) return aLast - bLast;
-    return a.joinedAt - b.joinedAt;
-  });
-
-  const ballot: BallotCandidate[] = sorted.slice(0, Math.max(0, ballotSize)).map((g) => ({
+  const ballot: BallotCandidate[] = rotationOrder(next).slice(0, Math.max(0, ballotSize)).map((g) => ({
     itemId: g.queue[0].id,
     ownerId: g.id,
     isMystery: false,
@@ -464,7 +562,6 @@ export function openBallot(guests: CrowdPickGuest[], ballotSize: number, wildcar
     isWildcard: g.lostRounds >= wildcardAfter,
     lostRounds: g.lostRounds,
   }));
-
   return { guests: next, ballot };
 }
 
@@ -496,7 +593,6 @@ export function closeBallot(
     const topVoted = ballot.filter((c) => tally.get(c.itemId) === maxVotes);
     winner = [...topVoted].sort((a, b) => a.waitingSince - b.waitingSince)[0];
   } else {
-    // No votes at all: rotation order decides, by credit — waiting time doesn't apply here.
     // Rotation order decides: the ballot is already in that order (openBallot), mystery songs last.
     winner = [...ballot].sort((a, b) => Number(a.isMystery) - Number(b.isMystery))[0];
   }
@@ -507,21 +603,23 @@ export function closeBallot(
     .sort((a, b) => b.lostRounds - a.lostRounds || a.waitingSince - b.waitingSince)[0];
   if (forcedWildcard && !winner.isWildcard) winner = forcedWildcard;
 
-  const nextGuests = guests.map((g) => {
+  // The winner uses a turn of this round, exactly as in draft(); a new round starts first if nobody had
+  // one left. Mystery wins sit outside the rotation (§7).
+  const working = guests.map((g) => ({ ...g, queue: [...g.queue] }));
+  if (!winner.isMystery) ensureRound(working);
+  const nextGuests = working.map((g) => {
     const onBallot = ballot.some((c) => c.ownerId === g.id && !c.isMystery);
-    if (!onBallot) return g;
     if (g.id === winner.ownerId && !winner.isMystery) {
-      // A turn costs what it costs in draft(): 1/weight. Mystery wins sit outside the rotation (§7).
-      return { ...g, credit: g.credit - turnCost(g.weight), lastTurnAt: now, lostRounds: 0, queue: g.queue.slice(1) };
+      return { ...g, credit: g.credit - 1, lastTurnAt: now, lostRounds: 0, queue: g.queue.slice(1) };
     }
-    return { ...g, lostRounds: g.lostRounds + 1 };
+    return onBallot ? { ...g, lostRounds: g.lostRounds + 1 } : g;
   });
 
   return { winnerItemId: winner.itemId, guests: nextGuests };
 }
 
 export interface UpcomingSlot {
-  kind: "guest" | "mystery" | "house";
+  kind: "guest" | "mystery" | "house" | "host";
   /** The song for a guest slot; null for mystery and house slots. */
   itemId: string | null;
   ownerId: string | null;

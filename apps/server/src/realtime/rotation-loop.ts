@@ -15,7 +15,7 @@ import { db, type DB } from "../db/client.js";
 import { queueItems, guests as guestsTable } from "../db/schema.js";
 import { getRoomSettings } from "../db/settings.js";
 import { getOnDeckItems, getAllTrackUrisForRoom } from "../db/queue.js";
-import { getRotationRoster, getMineQueue, getPoolItems, setRotationCredit } from "../db/rotation.js";
+import { getRotationRoster, getMineQueue, getPoolItems, getHouseItems, getPinnedHostItems, advancePinnedHostItems, setRotationCredit } from "../db/rotation.js";
 import { balance, apply } from "../db/tokens.js";
 import { setMysteryCounter, type Room } from "../db/rooms.js";
 import { listBannedUris } from "../db/bans.js";
@@ -28,6 +28,16 @@ import { POOL_KEY, skippedForSlot } from "./draft-veto.js";
  * house pick to come from) and hands `draft()` back the descriptor it needs to place it. */
 function buildHousePick(room: Room, database: DB): () => DraftedSong {
   return () => {
+    // The host's own songs come first: a song the host added takes the next house pick.
+    const hostSong = getHouseItems(room.id, database)[0];
+    if (hostSong) {
+      database
+        .update(queueItems)
+        .set({ status: "on_deck", draftedAt: new Date(), draftedBy: "house", position: 0 })
+        .where(eq(queueItems.id, hostSong.id))
+        .run();
+      return { itemId: hostSong.id, ownerId: null, isMystery: false, isHousePick: true, chargedTokens: 0 };
+    }
     if (!room.fallbackPlaylistUri) {
       throw new Error(`room ${room.code}: Rotation mode needs a fallback playlist before it can run out of guest songs`);
     }
@@ -47,6 +57,7 @@ function buildHousePick(room: Room, database: DB): () => DraftedSong {
         trackName: track.name,
         artistName: track.artistName,
         albumArtUrl: track.albumArtUrl,
+        albumName: track.albumName,
         durationMs: track.durationMs,
         addedBy: null,
         source: "fallback",
@@ -73,6 +84,12 @@ function buildHousePick(room: Room, database: DB): () => DraftedSong {
       .run();
     return { itemId: id, ownerId: null, isMystery: false, isHousePick: true, chargedTokens: 0 };
   };
+}
+
+/** A house slot on deck: a fallback-playlist track, or a host's song that took the house pick. Either
+ * can give way to a guest whose turn comes up. */
+function isHouseSlot(o: { source: string; draftedBy: string | null }): boolean {
+  return o.source === "fallback" || o.draftedBy === "house";
 }
 
 /** Everyone draft() can pick from, as they stand right now: shared by the real refill and the
@@ -142,7 +159,21 @@ export function refillOnDeck(room: Room, database: DB = db, opts: { nextDue?: bo
   // line: the player loop may already have sent that one to start.
   const nothingPlaying = !onDeckBefore.some((o) => o.status === "playing" || o.status === "locked");
   const yieldable = (o: (typeof onDeckBefore)[number], i: number) =>
-    o.source === "fallback" && o.status === "on_deck" && !(nothingPlaying && i === 0);
+    isHouseSlot(o) && o.status === "on_deck" && !(nothingPlaying && i === 0);
+  // A host song pinned to this slot in Coming up takes it before the rotation drafts anyone.
+  if (onDeckBefore.length < targetSize) {
+    const due = getPinnedHostItems(room.id, database).find((p) => (p.pinnedPosition ?? 0) <= 0);
+    if (due) {
+      const position = onDeckBefore.length ? Math.max(...onDeckBefore.map((o) => o.position)) + 1 : 1;
+      database
+        .update(queueItems)
+        .set({ status: "on_deck", draftedAt: new Date(), draftedBy: "host", pinnedPosition: null, position, paid: 0 })
+        .where(eq(queueItems.id, due.id))
+        .run();
+      advancePinnedHostItems(room.id, 1, database);
+      return true;
+    }
+  }
   if (onDeckBefore.length >= targetSize && !onDeckBefore.some(yieldable)) return false;
 
   const { rotationGuests, pool } = draftInputs(room, roster, database);
@@ -151,7 +182,7 @@ export function refillOnDeck(room: Room, database: DB = db, opts: { nextDue?: bo
     itemId: o.id,
     ownerId: o.addedBy,
     isMystery: o.anonymous,
-    isHousePick: o.source === "fallback",
+    isHousePick: isHouseSlot(o),
     chargedTokens: 0,
     canYield: yieldable(o, i),
   }));
@@ -172,6 +203,7 @@ export function refillOnDeck(room: Room, database: DB = db, opts: { nextDue?: bo
     mysteryCounter: room.mysteryCounter,
     onHouseDefault: false,
     housePick: buildHousePick(room, database),
+    boostedTurns: settings.boostedTurns,
   };
 
   const result = draft(state);
@@ -181,6 +213,12 @@ export function refillOnDeck(room: Room, database: DB = db, opts: { nextDue?: bo
   // One that someone already hearted or reacted to is still referenced, so the delete fails: it then
   // simply stays on deck (one song over the target, which play-through corrects).
   const yielded = result.yieldedHousePicks.filter((id) => {
+    // A host's song giving way goes back to the front of the host's waiting list, never away.
+    const hostSong = onDeckBefore.find((o) => o.id === id && o.draftedBy === "house");
+    if (hostSong) {
+      database.update(queueItems).set({ status: "house", draftedAt: null, draftedBy: null, position: -1 }).where(eq(queueItems.id, id)).run();
+      return true;
+    }
     try {
       return database.delete(queueItems).where(and(eq(queueItems.id, id), eq(queueItems.status, "on_deck"))).run().changes > 0;
     } catch (err) {
@@ -227,6 +265,9 @@ export function refillOnDeck(room: Room, database: DB = db, opts: { nextDue?: bo
     nextPosition++;
   }
 
+  // Every song now on deck brings each pinned host song a slot closer.
+  advancePinnedHostItems(room.id, result.onDeck.filter((d) => !before.has(d.itemId)).length, database);
+
   for (const g of result.guests) {
     setRotationCredit(room.id, g.id, g.credit, g.lastTurnAt ? new Date(g.lastTurnAt) : null, database);
   }
@@ -264,10 +305,10 @@ export function forecastUpcoming(room: Room, database: DB = db, count = UPCOMING
     itemId: o.id,
     ownerId: o.addedBy,
     isMystery: o.anonymous,
-    isHousePick: o.source === "fallback",
+    isHousePick: isHouseSlot(o),
     chargedTokens: 0,
   }));
-  return projectUpcoming(
+  const projected = projectUpcoming(
     {
       onDeckSize: onDeck.length,
       onDeck,
@@ -278,10 +319,19 @@ export function forecastUpcoming(room: Room, database: DB = db, count = UPCOMING
       mysteryEvery: settings.mysteryEvery,
       mysteryCounter: room.mysteryCounter,
       onHouseDefault: false,
+      boostedTurns: settings.boostedTurns,
       housePick: () => {
         throw new Error("unused: projectUpcoming supplies its own");
       },
     },
     count,
   );
+  // The host's pinned songs sit at their slots; guests' songs flow around them. Never past the point
+  // where house music takes over (nobody has a song), so a pin there just waits at the end.
+  for (const p of getPinnedHostItems(room.id, database)) {
+    const houseAt = projected.findIndex((s) => s.kind === "house");
+    const limit = houseAt >= 0 ? houseAt : projected.length;
+    projected.splice(Math.min(p.pinnedPosition ?? 0, limit), 0, { kind: "host", itemId: p.id, ownerId: null });
+  }
+  return projected.slice(0, count);
 }

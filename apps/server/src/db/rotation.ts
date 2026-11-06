@@ -1,5 +1,5 @@
-import { and, eq, inArray, isNull, sql } from "drizzle-orm";
-import { priceFor, ANONYMOUS_COST, onDeckSize, TURN_WEIGHTS, turnCost } from "@manyqueue/shared";
+import { and, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
+import { priceFor, ANONYMOUS_COST, onDeckSize, TURN_WEIGHTS, applyWeightChange } from "@manyqueue/shared";
 import { db, type DB } from "./client.js";
 import { queueItems, guests, rotationState } from "./schema.js";
 import { apply, balance } from "./tokens.js";
@@ -22,11 +22,10 @@ export function ensureRotationState(roomId: string, guestId: string, database: D
     .where(and(eq(rotationState.roomId, roomId), eq(rotationState.guestId, guestId)))
     .get();
   if (existing) return;
-  // §5 rule 2: joining mid-party goes to the end of the line. Level with the most-served guest is the end:
-  // everyone still owed a turn this round goes first, and the newcomer comes before the next round
-  // (see clampTurnCredit in @manyqueue/shared for how credit works).
-  const active = getRotationRoster(roomId, database).filter((r) => r.active);
-  const credit = active.length ? Math.min(...active.map((r) => r.credit)) : 0;
+  // §5 rule 2: joining mid-party goes to the end of the line: no turns left in this round, so everyone
+  // still owed one goes first and the newcomer's first turn is in the next round (see startRound in
+  // @manyqueue/shared for how rounds work).
+  const credit = 0;
   database
     .insert(rotationState)
     .values({ roomId, guestId, credit, weight: 1, lastTurnAt: null, joinedAt: new Date(), active: true })
@@ -70,6 +69,105 @@ export function getPoolItems(roomId: string, database: DB = db) {
     .all();
 }
 
+/**
+ * Rotation mode: where a song the host just added goes (it was inserted as a plain row).
+ * - "next": up next on deck, straight after whatever is playing or already handed to Spotify; a house
+ *   slot waiting there gives way (a fallback track is dropped, another host song goes back to waiting).
+ * - "house": the host's waiting list for house picks. If a fallback track is up next right now, the
+ *   host's song takes its place at once: it's the "next house pick" either way.
+ */
+export function placeHostSong(roomId: string, itemId: string, placement: "next" | "house", database: DB = db): void {
+  const onDeck = database
+    .select()
+    .from(queueItems)
+    .where(and(eq(queueItems.roomId, roomId), inArray(queueItems.status, ["on_deck", "locked", "playing"])))
+    .orderBy(queueItems.position)
+    .all();
+  const fixed = onDeck.filter((o) => o.status !== "on_deck");
+  const waiting = onDeck.filter((o) => o.status === "on_deck");
+  const firstWaiting = waiting[0];
+  const firstIsHouse = !!firstWaiting && (firstWaiting.source === "fallback" || firstWaiting.draftedBy === "house");
+  const giveWay = () => {
+    if (!firstWaiting) return;
+    if (firstWaiting.source === "fallback") {
+      try {
+        database.delete(queueItems).where(eq(queueItems.id, firstWaiting.id)).run();
+        return;
+      } catch {
+        // Someone already reacted to it, so the row is referenced: just park it as skipped.
+        database.update(queueItems).set({ status: "skipped", endedAt: new Date() }).where(eq(queueItems.id, firstWaiting.id)).run();
+        return;
+      }
+    }
+    database.update(queueItems).set({ status: "house", draftedAt: null, draftedBy: null, position: -1 }).where(eq(queueItems.id, firstWaiting.id)).run();
+  };
+
+  if (placement === "next" || firstIsHouse) {
+    if (firstIsHouse) giveWay();
+    const base = fixed.length ? Math.max(...fixed.map((o) => o.position)) + 1 : 1;
+    database
+      .update(queueItems)
+      .set({ status: "on_deck", draftedAt: new Date(), draftedBy: placement === "next" ? "host" : "house", position: base, paid: 0 })
+      .where(eq(queueItems.id, itemId))
+      .run();
+    // Everything else still waiting on deck moves back one.
+    let p = base + 1;
+    for (const w of waiting) {
+      if (firstIsHouse && w.id === firstWaiting.id) continue;
+      database.update(queueItems).set({ position: p++ }).where(eq(queueItems.id, w.id)).run();
+    }
+    return;
+  }
+  const house = getHouseItems(roomId, database);
+  const position = house.length ? Math.max(...house.map((h) => h.position)) + 1 : 0;
+  database.update(queueItems).set({ status: "house", position, paid: 0 }).where(eq(queueItems.id, itemId)).run();
+}
+
+/** The host's songs waiting for a house pick, in the order they'll take one (not the pinned ones). */
+export function getHouseItems(roomId: string, database: DB = db) {
+  return database
+    .select()
+    .from(queueItems)
+    .where(and(eq(queueItems.roomId, roomId), eq(queueItems.status, "house"), isNull(queueItems.pinnedPosition)))
+    .orderBy(queueItems.position, queueItems.addedAt)
+    .all();
+}
+
+/** The host's songs pinned to a slot in Coming up, soonest first. `pinnedPosition` is the slot: how many
+ * more songs get drafted before it (0 = it's next). */
+export function getPinnedHostItems(roomId: string, database: DB = db) {
+  return database
+    .select()
+    .from(queueItems)
+    .where(and(eq(queueItems.roomId, roomId), eq(queueItems.status, "house"), isNotNull(queueItems.pinnedPosition)))
+    .orderBy(queueItems.pinnedPosition, queueItems.addedAt)
+    .all();
+}
+
+/** Pins a host song to a slot in Coming up (null unpins it back to the house picks). */
+export function setHostPickSlot(roomId: string, itemId: string, slot: number | null, database: DB = db): boolean {
+  const item = database.select().from(queueItems).where(eq(queueItems.id, itemId)).get();
+  if (!item || item.roomId !== roomId || item.status !== "house") return false;
+  database
+    .update(queueItems)
+    .set({ pinnedPosition: slot === null ? null : Math.max(0, Math.min(50, Math.round(slot))) })
+    .where(eq(queueItems.id, itemId))
+    .run();
+  return true;
+}
+
+/** Songs were drafted onto deck: every pinned host song moves that many slots closer. */
+export function advancePinnedHostItems(roomId: string, drafted: number, database: DB = db): void {
+  if (drafted <= 0) return;
+  for (const p of getPinnedHostItems(roomId, database)) {
+    database
+      .update(queueItems)
+      .set({ pinnedPosition: Math.max(0, (p.pinnedPosition ?? 0) - drafted) })
+      .where(eq(queueItems.id, p.id))
+      .run();
+  }
+}
+
 export function setRotationCredit(
   roomId: string,
   guestId: string,
@@ -84,7 +182,7 @@ export function setRotationCredit(
     .run();
 }
 
-/** Host only (§8, §9) — applies from the next on-deck refill; credit already earned is kept. */
+/** Host only (§8, §9). Takes effect in the current round (applyWeightChange in @manyqueue/shared). */
 export function setGuestWeight(roomId: string, guestId: string, weight: number, database: DB = db): boolean {
   if (!(TURN_WEIGHTS as readonly number[]).includes(weight)) return false;
   const existing = database
@@ -93,9 +191,10 @@ export function setGuestWeight(roomId: string, guestId: string, weight: number, 
     .where(and(eq(rotationState.roomId, roomId), eq(rotationState.guestId, guestId)))
     .get();
   if (!existing) return false;
+  const next = applyWeightChange({ weight: existing.weight, credit: existing.credit, lastTurnAt: existing.lastTurnAt?.getTime() ?? null }, weight);
   database
     .update(rotationState)
-    .set({ weight })
+    .set({ weight, credit: next.credit, lastTurnAt: next.lastTurnAt === null ? null : new Date(next.lastTurnAt) })
     .where(and(eq(rotationState.roomId, roomId), eq(rotationState.guestId, guestId)))
     .run();
   return true;
@@ -131,7 +230,22 @@ function migrateSharedToRotation(roomId: string, database: DB): void {
     .all();
 
   const nextPositionByGuest = new Map<string, number>();
+  // Songs waiting in Shared mode's contest pool become fight entries (same pool row, same entry fee).
+  database
+    .update(queueItems)
+    .set({ status: "in_fight", minePosition: 9999 })
+    .where(and(eq(queueItems.roomId, roomId), eq(queueItems.status, "contest")))
+    .run();
   for (const item of items) {
+    // The host's own songs (ownerless, not a mystery): they take the house picks, ahead of the fallback.
+    if (!item.addedBy && !item.anonymous && item.source === "queue") {
+      database
+        .update(queueItems)
+        .set({ status: "house", minePosition: null, draftedAt: null, draftedBy: null, pinnedPosition: null })
+        .where(eq(queueItems.id, item.id))
+        .run();
+      continue;
+    }
     if (item.anonymous || !item.addedBy) {
       database
         .update(queueItems)
@@ -155,10 +269,16 @@ function migrateSharedToRotation(roomId: string, database: DB): void {
  * who can't cover it — since nothing charges twice, `paid` items are left alone. */
 function migrateRotationToShared(roomId: string, database: DB): void {
   const settings = getRoomSettings(roomId, database);
+  // Fight entries become Shared contest entries (same pool row, same entry fee).
+  database
+    .update(queueItems)
+    .set({ status: "contest", minePosition: null })
+    .where(and(eq(queueItems.roomId, roomId), eq(queueItems.status, "in_fight")))
+    .run();
   const items = database
     .select()
     .from(queueItems)
-    .where(and(eq(queueItems.roomId, roomId), inArray(queueItems.status, ["mine", "pool"])))
+    .where(and(eq(queueItems.roomId, roomId), inArray(queueItems.status, ["mine", "pool", "house"])))
     .orderBy(queueItems.addedAt)
     .all();
 
@@ -184,7 +304,7 @@ function migrateRotationToShared(roomId: string, database: DB): void {
     }
     database
       .update(queueItems)
-      .set({ status: "queued", paid, position, minePosition: null, draftedAt: null, draftedBy: null })
+      .set({ status: "queued", paid, position, minePosition: null, draftedAt: null, draftedBy: null, pinnedPosition: null })
       .where(eq(queueItems.id, item.id))
       .run();
     position++;
@@ -265,6 +385,23 @@ export function removeRotationItem(
   return { item, balanceAfterRefund };
 }
 
+/** Sets a guest's own queue order. `itemIds` must be exactly their queued songs (no more, no fewer), or
+ * nothing changes and it returns false. Used by the guest themselves and by the host's Queues board. */
+export function reorderMineQueue(roomId: string, guestId: string, itemIds: unknown, database: DB = db): boolean {
+  if (!Array.isArray(itemIds) || !itemIds.every((id) => typeof id === "string")) return false;
+  const mine = getMineQueue(roomId, guestId, database);
+  const currentIds = new Set(mine.map((m) => m.id));
+  if (itemIds.length !== mine.length || new Set(itemIds).size !== itemIds.length || !itemIds.every((id) => currentIds.has(id))) return false;
+  itemIds.forEach((id, index) => {
+    database
+      .update(queueItems)
+      .set({ minePosition: index })
+      .where(and(eq(queueItems.id, id), eq(queueItems.addedBy, guestId), eq(queueItems.status, "mine")))
+      .run();
+  });
+  return true;
+}
+
 // ---- Host Queues board (R7, §9) ----
 
 export interface HostDraftResult {
@@ -279,7 +416,8 @@ export interface HostDraftResult {
 function resetTurnCredit(roomId: string, guestId: string, roster: RotationState[], now: Date, database: DB): void {
   const g = roster.find((r) => r.guestId === guestId);
   if (!g) return;
-  setRotationCredit(roomId, guestId, g.credit - turnCost(g.weight), now, database);
+  // One turn of this round; with none left it's borrowed from the next (credit goes below 0).
+  setRotationCredit(roomId, guestId, g.credit - 1, now, database);
 }
 
 /**

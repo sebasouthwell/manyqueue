@@ -11,8 +11,9 @@ import {
   resetSpotifyLimiterForTests,
   SpotifyQueueBlockedError,
   SpotifyPlayUnconfirmedError,
-  SpotifyQueueNotListedError,
   MAX_PLAY_NOW_SKIPS,
+  looksLikeSameSong,
+  SpotifyTrackUnplayableError,
 } from "./spotify.js";
 
 process.env.SPOTIFY_CLIENT_ID = "id";
@@ -24,7 +25,7 @@ const json = (body: unknown, init: ResponseInit = {}) =>
   new Response(JSON.stringify(body), { headers: { "content-type": "application/json" }, ...init });
 
 /** A tiny Spotify player: a current song and a queue, driven by the same calls the app makes. */
-let player: { current: string | null; queue: string[]; refuse: Set<string>; nextGoesTo?: string; listingLag: number; dropAdds?: boolean; desktop?: boolean; relinkTo?: string };
+let player: { current: string | null; queue: string[]; refuse: Set<string>; nextGoesTo?: string; listingLag: number; dropAdds?: boolean; desktop?: boolean; relinkTo?: string; knockedOut?: boolean; unplayable?: Set<string> };
 let playBodies: { uris?: string[]; context_uri?: string; offset?: { uri: string } }[];
 let calls: string[];
 
@@ -53,7 +54,7 @@ beforeEach(() => {
       }
       if (key === "GET /me/player/queue") return json({ currently_playing: { uri: player.current }, queue: player.queue.map((uri) => ({ uri })) });
       if (key === "POST /me/player/next") {
-        player.current = player.nextGoesTo ?? player.queue.shift() ?? null;
+        player.current = player.knockedOut ? null : (player.nextGoesTo ?? player.queue.shift() ?? null);
         return new Response(null, { status: 204 });
       }
       if (key === "PUT /me/player/play") {
@@ -68,7 +69,7 @@ beforeEach(() => {
         const id = path.split("/").pop()!;
         // A relinked copy has a different id but the same name and length.
         const name = id === "relinked" || id === "ours" ? "Our Song" : id;
-        return json({ name, duration_ms: 9_000, album: { uri: "spotify:album:alb" } });
+        return json({ name, duration_ms: 9_000, album: { uri: "spotify:album:alb" }, is_playable: !player.unplayable?.has(id) });
       }
       if (key === "GET /me/player") {
         return player.current
@@ -135,6 +136,28 @@ describe("playTrackOnDevice — play now without trusting any one call", () => {
     expect(playCalls()).toBe(1);
   });
 
+  it("a track that can't play in this region (seen live): no queue, no skip, no album start, just reported", async () => {
+    player.unplayable = new Set([OURS.split(":").pop()!]);
+    const err = await playTrackOnDevice("h1", "pc", OURS).catch((e) => e);
+    expect(err).toBeInstanceOf(SpotifyTrackUnplayableError);
+    expect(calls.filter((c) => c !== "GET /tracks/" + OURS.split(":").pop() && !c.startsWith("GET /tracks/"))).toEqual([]);
+    expect(playCalls()).toBe(0);
+  });
+
+  it("playability unknown (the lookup failed): queue + next may try, but never an album start", async () => {
+    player.refuse.add("GET /tracks/ours");
+    player.knockedOut = true;
+    const err = await playTrackOnDevice("h1", "pc", OURS).catch((e) => e);
+    expect(err).toBeInstanceOf(SpotifyPlayUnconfirmedError);
+    expect(playCalls()).toBe(0);
+  });
+
+  it("a knocked-out player that plays nothing after the skip (seen live) is revived with album + offset", async () => {
+    player.knockedOut = true;
+    await expect(playTrackOnDevice("h1", "pc", OURS)).resolves.toBe(OURS);
+    expect(playBodies[0]?.context_uri).toBe("spotify:album:alb");
+  });
+
   it("wrong song afterwards: reported once, not chased with more skips or PUT play", async () => {
     player.nextGoesTo = "spotify:track:somethingelse";
     const err = await playTrackOnDevice("h1", "pc", OURS).catch((e) => e);
@@ -151,11 +174,34 @@ describe("playTrackOnDevice — play now without trusting any one call", () => {
     expect(playCalls()).toBe(0);
   });
 
-  it("never listed at all: reported, and no PUT play (that's what knocks desktop Spotify out)", async () => {
+  it("never listed at all (seen live): starts the song directly instead of retrying the add every tick", async () => {
     player.dropAdds = true;
-    const err = await playTrackOnDevice("h1", "pc", OURS).catch((e) => e);
-    expect(err).toBeInstanceOf(SpotifyQueueNotListedError);
-    expect(playCalls()).toBe(0);
+    await playTrackOnDevice("h1", "pc", OURS).catch(() => null);
+    expect(playCalls()).toBe(1); // album + offset, the start that works on desktop Spotify
     expect(nexts()).toBe(0);
+  });
+});
+
+describe("looksLikeSameSong (relinked copies)", () => {
+  it("accepts another release a couple of seconds off, and remaster/live suffixes", () => {
+    const a = { name: "Straight Edge", artist: "Minor Threat", durationMs: 47_226 };
+    expect(looksLikeSameSong(a, { name: "Straight Edge", artist: "Minor Threat", durationMs: 45_160 })).toBe(true);
+    expect(looksLikeSameSong({ ...a, name: "Wild Honey Pie" }, { ...a, name: "Wild Honey Pie - Remastered 2009" })).toBe(true);
+    const jp = { name: "Hangyakusurufuukei", artist: "Boris", durationMs: 200_000 };
+    expect(looksLikeSameSong(jp, { ...jp, name: "反逆する風景", durationMs: 200_400 })).toBe(true);
+  });
+  it("rejects a different song, a different artist, or a very different length", () => {
+    const a = { name: "Intro", artist: "The xx", durationMs: 120_000 };
+    expect(looksLikeSameSong(a, { ...a, name: "Outro" })).toBe(false);
+    expect(looksLikeSameSong(a, { ...a, artist: "M83" })).toBe(false);
+    // The same artists in another order (seen live on "Nature Session").
+    const ns = { name: "Nature Session", artist: "BluntOne", artists: ["BluntOne", "Mujo"], durationMs: 50_192 };
+    expect(looksLikeSameSong(ns, { ...ns, artist: "Mujo", artists: ["Mujo", "BluntOne"] })).toBe(true);
+    expect(looksLikeSameSong(ns, { ...ns, artist: "Nujabes", artists: ["Nujabes"] })).toBe(false);
+    // Punctuation / "Pt." differences between copies (seen live on Lettuce's "'Lude, Pt. 2").
+    const lude = { name: "'Lude, Pt. 2", artist: "Lettuce", durationMs: 37_266 };
+    expect(looksLikeSameSong(lude, { ...lude, name: "'Lude 2" })).toBe(true);
+    expect(looksLikeSameSong(lude, { ...lude, name: "'Lude, Pt. 3" })).toBe(false);
+    expect(looksLikeSameSong(a, { ...a, durationMs: 140_000 })).toBe(false);
   });
 });

@@ -1,4 +1,5 @@
 import { useRoomStore } from "../store/roomStore";
+import { HatCover } from "./Holiday";
 
 export function HostNowPlayingCard({ code }: { code: string }) {
   const queue = useRoomStore((s) => s.queue);
@@ -26,7 +27,7 @@ export function HostNowPlayingCard({ code }: { code: string }) {
   return (
     <div className="flex w-full max-w-sm items-center gap-3 rounded-lg bg-section p-4">
       {nowPlaying.albumArtUrl ? (
-        <img src={nowPlaying.albumArtUrl} alt="" className="h-14 w-14 rounded" />
+        <HatCover trackName={nowPlaying.trackName} size={56}><img src={nowPlaying.albumArtUrl} alt="" className="h-14 w-14 rounded" /></HatCover>
       ) : (
         <div className="h-14 w-14 rounded bg-accent-800" />
       )}

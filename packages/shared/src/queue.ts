@@ -11,7 +11,9 @@ export type QueueItemStatus =
   | "mine"
   | "pool"
   | "on_deck"
-  | "in_fight";
+  | "in_fight"
+  // A song the host added in Rotation mode, waiting to take the next house pick.
+  | "house";
 export type QueueItemSource = "queue" | "fallback";
 
 /** A skip this far through the song (or further) is basically the song having played — reaching for the
@@ -31,6 +33,8 @@ export interface QueueItemView {
   trackName: string;
   artistName: string;
   albumArtUrl: string | null;
+  /** When known: lets a Christmas album's songs wear the Santa hat even without "Christmas" in the title. */
+  albumName?: string | null;
   durationMs: number;
   position: number;
   status: QueueItemStatus;

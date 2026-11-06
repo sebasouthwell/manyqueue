@@ -215,6 +215,7 @@ export function resetSpotifyLimiterForTests(): void {
   slotState.backup = newSlotState();
   accessTokenCache.clear();
   inflight.clear();
+  playableCache.clear();
   devicesCache.clear();
   lastStatusJson = "";
   onStatusChange = null;
@@ -461,9 +462,11 @@ interface SpotifyTrackItem {
   uri: string;
   name: string;
   artists: { name: string }[];
-  album: { images: { url: string }[]; release_date: string };
+  album: { images: { url: string }[]; release_date: string; name?: string };
   duration_ms: number;
   explicit?: boolean;
+  /** Only present when a market is given: false = can't be played in that region. */
+  is_playable?: boolean;
 }
 
 interface SpotifySearchResponse {
@@ -474,6 +477,7 @@ export interface SearchTrack {
   uri: string;
   name: string;
   artistName: string;
+  albumName: string | null;
   albumArtUrl: string | null;
   durationMs: number;
   releaseYear: number | null;
@@ -494,6 +498,17 @@ export async function getTrackInfo(
   return { durationMs: data.duration_ms, explicit: !!data.explicit };
 }
 
+/** Album names of tracks recently offered in search, so an add can store the album (what makes "Santa
+ * Tell Me" a Christmas song is its album) without the phone having to send it. */
+const albumNames = new Map<string, string>();
+export function rememberAlbumNames(tracks: { uri: string; albumName?: string | null }[]): void {
+  if (albumNames.size > 20_000) albumNames.clear();
+  for (const t of tracks) if (t.albumName) albumNames.set(t.uri, t.albumName);
+}
+export function albumNameOf(uri: string): string | null {
+  return albumNames.get(uri) ?? null;
+}
+
 export async function searchTracks(
   hostId: string,
   query: string,
@@ -505,6 +520,8 @@ export async function searchTracks(
     type: "track",
     limit: String(limit),
     offset: String(offset),
+    // The host's own market, so Spotify says which tracks can't be played there.
+    market: "from_token",
   });
   const res = await spotifyFetch(hostId, `/search?${params.toString()}`);
   if (!res.ok) {
@@ -512,10 +529,13 @@ export async function searchTracks(
   }
 
   const data = (await res.json()) as SpotifySearchResponse;
-  const tracks = data.tracks.items.map((item) => ({
+  // A track that can't be played in the host's region is never offered: asking Spotify to play one is
+  // what jams desktop Spotify (see isPlayableHere).
+  const tracks = data.tracks.items.filter((item) => item.is_playable !== false).map((item) => ({
     uri: item.uri,
     name: item.name,
     artistName: item.artists.map((a) => a.name).join(", "),
+    albumName: item.album.name ?? null,
     albumArtUrl: item.album.images[0]?.url ?? null,
     durationMs: item.duration_ms,
     releaseYear: item.album.release_date ? Number(item.album.release_date.slice(0, 4)) : null,
@@ -648,6 +668,42 @@ export class SpotifyQueueBlockedError extends Error {
 }
 
 /** Every call worked but a different song is playing afterwards. */
+/** The song can't be played in the host's region (Spotify: is_playable false), so no request for it was
+ * sent. The player loop skips it. */
+export class SpotifyTrackUnplayableError extends Error {
+  constructor(readonly uri: string) {
+    super(`${uri} isn't playable in this account's region`);
+    this.name = "SpotifyTrackUnplayableError";
+  }
+}
+
+const playableCache = new Map<string, { playable: boolean; at: number }>();
+/**
+ * Whether Spotify can play this track for the host's account (market=from_token). Seen live: starting a
+ * region-blocked track's album at that track gets a 204 and leaves desktop Spotify paused with nothing
+ * loaded and every control refused, until the app is restarted. So nothing is ever played or queued
+ * without this check. null = the lookup failed (logged): queue + next may still try it (harmless if it's
+ * blocked: Spotify just drops it), but an album is never started for an unconfirmed track.
+ */
+export async function isPlayableHere(hostId: string, uri: string): Promise<boolean | null> {
+  const hit = playableCache.get(uri);
+  if (hit && Date.now() - hit.at < 6 * 3_600_000) return hit.playable;
+  const id = uri.split(":").pop();
+  const res = id ? await spotifyFetch(hostId, `/tracks/${id}?market=from_token`).catch((err: Error) => {
+    console.warn(`[spotify] playability lookup for ${uri} failed: ${err.message}`);
+    return null;
+  }) : null;
+  if (!res?.ok) {
+    if (res) console.warn(`[spotify] playability lookup for ${uri} answered ${res.status}: ${(await res.text().catch(() => "")).slice(0, 160)}`);
+    return null;
+  }
+  const data = (await res.json()) as { is_playable?: boolean };
+  const playable = data.is_playable !== false;
+  if (playableCache.size > 5000) playableCache.clear();
+  playableCache.set(uri, { playable, at: Date.now() });
+  return playable;
+}
+
 export class SpotifyPlayUnconfirmedError extends Error {
   constructor(public readonly playing: string | null) {
     super(`asked Spotify for a song, but ${playing ?? "nothing"} is playing`);
@@ -675,8 +731,8 @@ export class SpotifyQueueNotListedError extends Error {
  *  3. skip exactly that many plus one;
  *  4. check ours is the one playing.
  *
- * Not PUT /me/player/play {uris}: desktop Spotify (seen 2026-11-04 on a Windows PC, and the same shape
- * on an iPhone earlier that night) answers 204 to that and then drops to "paused, nothing loaded",
+ * Not PUT /me/player/play {uris}: desktop Spotify (and the same shape on the iOS app) answers 204 to
+ * that and then drops to "paused, nothing loaded",
  * which the room saw as the speaker disconnecting. Queue + next worked every time. Starting the song's
  * album at that song (playFromAlbum) is the fallback for a device that refuses the queue or the skip
  * (nothing loaded at all), and for a queue too cluttered to skip through, after which the caller warns
@@ -692,14 +748,13 @@ export async function playTrackOnDevice(
   uri: string,
   opts: { alreadyQueued?: boolean } = {},
 ): Promise<string> {
+  if ((await isPlayableHere(hostId, uri)) === false) throw new SpotifyTrackUnplayableError(uri);
   if (!opts.alreadyQueued) {
     const params = new URLSearchParams({ uri, device_id: deviceId });
     const queued = await spotifyFetch(hostId, `/me/player/queue?${params.toString()}`, { method: "POST" });
     if (!queued.ok && queued.status !== 204) return playFromAlbum(hostId, deviceId, uri);
   }
 
-  // No fallback play when it's missing: the device took the add, so the queue route is working there.
-  // The player loop's own retry comes round again instead.
   let skips: number | null = null;
   for (const delay of LISTING_DELAYS_MS) {
     await new Promise((r) => setTimeout(r, delay));
@@ -707,7 +762,10 @@ export async function playTrackOnDevice(
     skips = listing ? skipsToReach(listing, uri) : null;
     if (skips !== null) break;
   }
-  if (skips === null) throw new SpotifyQueueNotListedError();
+  // The device said yes to the add but the song never showed up in its queue (seen live on desktop
+  // Spotify playing an album context: it kept playing the album, and retrying the add every tick never
+  // got anywhere). Start the song directly instead.
+  if (skips === null) return playFromAlbum(hostId, deviceId, uri);
   if (skips > MAX_PLAY_NOW_SKIPS + 1) {
     await playFromAlbum(hostId, deviceId, uri);
     throw new SpotifyQueueBlockedError(skips - 1);
@@ -718,7 +776,15 @@ export async function playTrackOnDevice(
     if (!skipped.ok && skipped.status !== 204) return playFromAlbum(hostId, deviceId, uri);
   }
 
-  return confirmPlaying(hostId, uri);
+  try {
+    return await confirmPlaying(hostId, uri);
+  } catch (err) {
+    // Nothing playing at all after the skip: the player is knocked out (desktop Spotify sits paused
+    // with nothing loaded and won't start from its queue, seen live). Starting the album at our song
+    // is what revives it. A wrong song is still reported, not chased.
+    if (err instanceof SpotifyPlayUnconfirmedError && err.playing === null) return playFromAlbum(hostId, deviceId, uri);
+    throw err;
+  }
 }
 
 /**
@@ -738,21 +804,64 @@ async function confirmPlaying(hostId: string, uri: string): Promise<string> {
   throw new SpotifyPlayUnconfirmedError(playing);
 }
 
-const trackFacts = new Map<string, { name: string; durationMs: number; albumUri: string | null } | null>();
+const trackFacts = new Map<string, { name: string; artist: string; artists: string[]; durationMs: number; albumUri: string | null } | null>();
 async function factsOf(hostId: string, uri: string) {
   if (trackFacts.has(uri)) return trackFacts.get(uri)!;
   const id = uri.split(":").pop();
   const res = id ? await spotifyFetch(hostId, `/tracks/${id}`).catch(() => null) : null;
-  const data = res?.ok ? ((await res.json()) as { name?: string; duration_ms?: number; album?: { uri?: string } }) : null;
-  const facts = data?.name ? { name: data.name, durationMs: data.duration_ms ?? 0, albumUri: data.album?.uri ?? null } : null;
+  const data = res?.ok
+    ? ((await res.json()) as { name?: string; duration_ms?: number; album?: { uri?: string }; artists?: { name?: string }[] })
+    : null;
+  const facts = data?.name
+    ? { name: data.name, artist: data.artists?.[0]?.name ?? "", artists: (data.artists ?? []).map((x) => x.name ?? "").filter(Boolean), durationMs: data.duration_ms ?? 0, albumUri: data.album?.uri ?? null }
+    : null;
   if (trackFacts.size > 2000) trackFacts.clear();
   if (facts) trackFacts.set(uri, facts); // a failed lookup is retried next time
   return facts;
 }
 
-async function sameSong(hostId: string, a: string, b: string): Promise<boolean> {
+/** "Straight Edge", "Straight Edge - Remastered 2009" and "Straight Edge (Live)" all compare as "straight edge". */
+export function songTitleKey(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/\s+-\s+.*$/, "")
+    .replace(/\s*[([].*?[)\]]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** Another release of the same song: same title, an artist in common, and about the same length. Not just
+ * the lead artist: copies can list the same artists in another order (seen live: "Nature Session" as
+ * BluntOne/Mujo and Mujo/BluntOne, restarted twice for it). Spotify swaps
+ * in the copy for the listener's market, and those can differ by a few seconds (seen live: a 7" and a
+ * compilation copy of "Straight Edge", 2.1s apart), so length allows 5s or 5%, whichever is more. */
+export function looksLikeSameSong(
+  a: { name: string; artist: string; artists?: string[]; durationMs: number },
+  b: { name: string; artist: string; artists?: string[]; durationMs: number },
+): boolean {
+  const tolerance = Math.max(5_000, 0.05 * Math.max(a.durationMs, b.durationMs));
+  const names = (x: typeof a) => new Set([x.artist, ...(x.artists ?? [])].map((n) => n.toLowerCase()).filter(Boolean));
+  const bNames = names(b);
+  const aNames = names(a);
+  const sameArtist = (aNames.size === 0 && bNames.size === 0) || [...aNames].some((n) => bNames.has(n));
+  const gap = Math.abs(a.durationMs - b.durationMs);
+  // A title in another script ("反逆する風景" for "Hangyakusurufuukei", seen live) still matches when the
+  // artist is the same and the length is within a second.
+  const nonLatin = (t: string) => /[^\u0000-\u024f\u2000-\u206f]/.test(t);
+  const otherScript = nonLatin(a.name) !== nonLatin(b.name);
+  // Punctuation and "Pt."/"Part" don't make another song ("'Lude 2" vs "'Lude, Pt. 2", seen live).
+  const loose = (t: string) =>
+    songTitleKey(t)
+      .replace(/\b(pt|part)\b\.?/g, " ")
+      .replace(/[^\p{L}\p{N}]+/gu, " ")
+      .trim();
+  return sameArtist && ((otherScript && gap <= 1_000) || (loose(a.name) === loose(b.name) && gap <= tolerance));
+}
+
+/** Two track ids for one song (relinking): same title, a shared artist and length. Facts are cached. */
+export async function sameSong(hostId: string, a: string, b: string): Promise<boolean> {
   const [fa, fb] = await Promise.all([factsOf(hostId, a), factsOf(hostId, b)]);
-  return !!fa && !!fb && fa.name.toLowerCase() === fb.name.toLowerCase() && Math.abs(fa.durationMs - fb.durationMs) < 2_000;
+  return !!fa && !!fb && looksLikeSameSong(fa, fb);
 }
 
 /**
@@ -763,6 +872,11 @@ async function sameSong(hostId: string, a: string, b: string): Promise<boolean> 
  * album can't be looked up.
  */
 async function playFromAlbum(hostId: string, deviceId: string, uri: string): Promise<string> {
+  // Never start an album for a track that can't play here: that's exactly what jams desktop Spotify.
+  // Not even when we couldn't find out: only a confirmed-playable track gets an album start.
+  const playable = await isPlayableHere(hostId, uri);
+  if (playable === false) throw new SpotifyTrackUnplayableError(uri);
+  if (playable === null) throw new SpotifyPlayUnconfirmedError(null);
   const albumUri = (await factsOf(hostId, uri))?.albumUri;
   const res = await spotifyFetch(hostId, `/me/player/play?device_id=${deviceId}`, {
     method: "PUT",
@@ -779,6 +893,7 @@ export async function queueTrackOnDevice(
   deviceId: string,
   uri: string,
 ): Promise<void> {
+  if ((await isPlayableHere(hostId, uri)) === false) throw new SpotifyTrackUnplayableError(uri);
   const params = new URLSearchParams({ uri, device_id: deviceId });
   const res = await spotifyFetch(hostId, `/me/player/queue?${params.toString()}`, {
     method: "POST",
@@ -821,6 +936,7 @@ export async function getPlaylistTracks(hostId: string, playlistId: string): Pro
       uri: row.item.uri,
       name: row.item.name,
       artistName: row.item.artists.map((a) => a.name).join(", "),
+      albumName: row.item.album.name ?? null,
       albumArtUrl: row.item.album.images[0]?.url ?? null,
       durationMs: row.item.duration_ms,
       releaseYear: row.item.album.release_date
@@ -886,6 +1002,15 @@ export async function resumePlayback(hostId: string, deviceId: string): Promise<
   });
   if (!res.ok && res.status !== 204) {
     throw new Error(`Spotify resume failed: ${res.status} ${await res.text()}`);
+  }
+}
+
+export async function seekPlayback(hostId: string, deviceId: string, positionMs: number): Promise<void> {
+  const res = await spotifyFetch(hostId, `/me/player/seek?position_ms=${Math.max(0, Math.round(positionMs))}&device_id=${deviceId}`, {
+    method: "PUT",
+  });
+  if (!res.ok && res.status !== 204) {
+    throw new Error(`Spotify seek failed: ${res.status} ${await res.text()}`);
   }
 }
 

@@ -10,7 +10,7 @@ import { getAiUsage } from "../db/ai-nicknames.js";
 import { getCachedGenres } from "../db/genres.js";
 import { buildTasteProfiles, artistsForTasting } from "../db/taste.js";
 import { generateNicknames } from "./nicknames.js";
-import { setAiLogger } from "./deepseek.js";
+import { setAiLogger } from "./provider.js";
 import { ensureGenres } from "./genres.js";
 import type { DB } from "../db/client.js";
 
@@ -41,6 +41,7 @@ beforeEach(() => {
   requests = [];
   status = 200;
   process.env.DEEPSEEK_API_KEY = "test-key";
+  process.env.AI_PROVIDER = "deepseek"; // these tests talk to the local DeepSeek fake, even if a Claude key is set
 });
 
 function addGuest(db: DB, id: string, nickname: string) {
@@ -186,8 +187,15 @@ describe("generateNicknames", () => {
     for (let i = 0; i < 10; i++) expect((await generateNicknames("room-1", {}, db)).ok).toBe(true);
     expect(await generateNicknames("room-1", {}, db)).toEqual({ ok: false, reason: "budget" });
 
+    // No key at all: a Claude key in the environment would otherwise be used as the fallback.
+    const claudeKey = process.env.ANTHROPIC_API_KEY;
     delete process.env.DEEPSEEK_API_KEY;
-    expect(await generateNicknames("room-1", {}, createTestDb())).toEqual({ ok: false, reason: "not_configured" });
+    delete process.env.ANTHROPIC_API_KEY;
+    try {
+      expect(await generateNicknames("room-1", {}, createTestDb())).toEqual({ ok: false, reason: "not_configured" });
+    } finally {
+      if (claudeKey !== undefined) process.env.ANTHROPIC_API_KEY = claudeKey;
+    }
   });
 
   it("reports an unusable reply without throwing", async () => {

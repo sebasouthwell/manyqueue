@@ -3,6 +3,7 @@ import { Check, Fire } from "@phosphor-icons/react";
 import type { BallotView } from "@manyqueue/shared";
 import { useRoomStore } from "../store/roomStore";
 import { Emoji } from "./Emoji";
+import { HatCover } from "./Holiday";
 
 /** A stable per-phone order (§6: "shuffled differently for each voter"): the same seed gives the same
  * order on every update, so rows don't jump about while the counts change. */
@@ -99,7 +100,7 @@ export function BallotCard({ code, guestId, ballot }: { code: string; guestId: s
               aria-hidden
             />
             {e.albumArtUrl ? (
-              <img src={e.albumArtUrl} alt="" className="relative h-10 w-10 shrink-0 rounded" />
+              <HatCover trackName={e.trackName} size={40}><img src={e.albumArtUrl} alt="" className="relative h-10 w-10 shrink-0 rounded" /></HatCover>
             ) : (
               <div className="relative h-10 w-10 shrink-0 rounded bg-accent-800" />
             )}

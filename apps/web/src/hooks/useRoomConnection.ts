@@ -30,6 +30,7 @@ import {
   type RotationRoomView,
   type HostRotationBoardView,
   type MyWeightPayload,
+  type GlitchState,
 } from "@manyqueue/shared";
 import { getSocket } from "../socket";
 import { useRoomStore } from "../store/roomStore";
@@ -135,6 +136,9 @@ export function useRoomConnection(code: string | null, role: ClientRole, guestId
     function handleMyWeightUpdate(payload: MyWeightPayload) {
       setMyWeight(payload.weight);
     }
+    function handleGlitch(payload: GlitchState) {
+      useRoomStore.getState().setMyGlitch(payload);
+    }
     function handleVolume(payload: VolumeUpdatePayload) {
       setVolumePercent(payload.percent);
     }
@@ -211,6 +215,7 @@ export function useRoomConnection(code: string | null, role: ClientRole, guestId
     socket.on(SOCKET_EVENTS.ROTATION_UPDATE, handleRotationUpdate);
     socket.on(SOCKET_EVENTS.ROTATION_HOST_UPDATE, handleRotationHostUpdate);
     socket.on(SOCKET_EVENTS.MY_WEIGHT_UPDATE, handleMyWeightUpdate);
+    socket.on(SOCKET_EVENTS.GLITCH_UPDATE, handleGlitch);
     socket.on(SOCKET_EVENTS.VOTE_TALLY, handleVoteTally);
     socket.on(SOCKET_EVENTS.VOTE_OPENED, handleVoteOpened);
     socket.on(SOCKET_EVENTS.REACTION, handleReaction);
@@ -245,6 +250,7 @@ export function useRoomConnection(code: string | null, role: ClientRole, guestId
       socket.off(SOCKET_EVENTS.ROTATION_UPDATE, handleRotationUpdate);
       socket.off(SOCKET_EVENTS.ROTATION_HOST_UPDATE, handleRotationHostUpdate);
       socket.off(SOCKET_EVENTS.MY_WEIGHT_UPDATE, handleMyWeightUpdate);
+      socket.off(SOCKET_EVENTS.GLITCH_UPDATE, handleGlitch);
       socket.off(SOCKET_EVENTS.VOTE_TALLY, handleVoteTally);
       socket.off(SOCKET_EVENTS.VOTE_OPENED, handleVoteOpened);
       socket.off(SOCKET_EVENTS.REACTION, handleReaction);

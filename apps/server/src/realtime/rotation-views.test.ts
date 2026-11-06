@@ -111,3 +111,29 @@ describe("buildHostRotationBoard", () => {
     expect(board.pool[0]).not.toHaveProperty("addedBy");
   });
 });
+
+describe("Coming up shows the songs (showUpcomingSongs)", () => {
+  it("includes titles by default, and only whose pick when the host turns it off", async () => {
+    const { createTestDb, seedRoomWithGuest } = await import("../db/test-helpers.js");
+    const { addQueueItem } = await import("../db/queue.js");
+    const { updateRoomSettings } = await import("../db/settings.js");
+    const { ensureRotationState } = await import("../db/rotation.js");
+    const { getRoomById } = await import("../db/rooms.js");
+    const { queueItems } = await import("../db/schema.js");
+    const { eq } = await import("drizzle-orm");
+    const { buildRotationRoomView } = await import("./rotation-views.js");
+    const db = createTestDb();
+    seedRoomWithGuest(db);
+    updateRoomSettings("room-1", { mode: "rotation", tokenMode: false }, db);
+    ensureRotationState("room-1", "guest-1", db);
+    const item = addQueueItem(
+      { roomId: "room-1", trackUri: "t1", trackName: "Song One", artistName: "Band", albumArtUrl: null, durationMs: 1000, addedBy: "guest-1" },
+      db,
+    );
+    db.update(queueItems).set({ status: "mine", minePosition: 0 }).where(eq(queueItems.id, item.id)).run();
+    const room = getRoomById("room-1", db)!;
+    expect(buildRotationRoomView(room, db).upcoming[0]?.trackName).toBe("Song One");
+    updateRoomSettings("room-1", { showUpcomingSongs: false }, db);
+    expect(buildRotationRoomView(room, db).upcoming[0]?.trackName).toBeUndefined();
+  });
+});

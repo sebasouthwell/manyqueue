@@ -6,7 +6,9 @@
     "dev": "concurrently -n web,server -c cyan,magenta \"pnpm --filter @manyqueue/web dev\" \"pnpm --filter @manyqueue/server dev\"",
     "build": "pnpm --filter @manyqueue/shared build && pnpm --filter @manyqueue/web build && pnpm --filter @manyqueue/server build",
     "db:generate": "pnpm --filter @manyqueue/server db:generate",
-    "db:migrate": "pnpm --filter @manyqueue/server db:migrate"
+    "db:migrate": "pnpm --filter @manyqueue/server db:migrate",
+    "typecheck": "pnpm --filter @manyqueue/server exec tsc --noEmit -p . && pnpm --filter @manyqueue/web exec tsc --noEmit -p .",
+    "test": "pnpm --filter @manyqueue/shared test && pnpm --filter @manyqueue/server test"
   },
   "devDependencies": {
     "concurrently": "^9.1.0"
@@ -14,7 +16,5 @@
   "engines": {
     "node": ">=20"
   },
-  "pnpm": {
-    "onlyBuiltDependencies": ["better-sqlite3", "esbuild"]
-  }
+  "packageManager": "pnpm@12.16.1"
 }

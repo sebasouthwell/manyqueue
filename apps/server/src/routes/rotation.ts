@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import type { FastifyPluginAsync } from "fastify";
 import { and, eq } from "drizzle-orm";
 import { songRuleViolation, checkDedication, SOCKET_EVENTS, type TokenUpdatePayload } from "@manyqueue/shared";
@@ -8,6 +9,7 @@ import { getTrackInfo } from "../spotify.js";
 import { addQueueItem } from "../db/queue.js";
 import {
   getMineQueue,
+  reorderMineQueue,
   setMineDedication,
   sendToMysteryPool,
   pullFromMysteryPool,
@@ -30,6 +32,10 @@ import { broadcastRotationState, broadcastBallotState, buildRotationRoomView, bu
 import { castVote, getMyVote, pullFromBallot } from "../realtime/crowd-pick.js";
 import { POOL_KEY, skipPendingDraft, vetoCommitsAt } from "../realtime/draft-veto.js";
 import { forecastUpcoming } from "../realtime/rotation-loop.js";
+import { enterFight, leaveFight, FIGHT_BLOCKER_TEXT } from "../db/fight.js";
+import { getPoolEntryForGuest } from "../db/contest.js";
+import { broadcastContestPool, getRunningContest } from "../realtime/contest.js";
+import { maybeStartFight } from "../realtime/fight.js";
 
 interface AddBody {
   trackUri?: string;
@@ -123,22 +129,30 @@ export const rotationRoutes: FastifyPluginAsync = async (app) => {
     const guest = getActiveGuest(req, room);
     if (!guest) return reply.code(401).send({ error: "not_joined" });
 
-    const { itemIds } = req.body ?? {};
-    if (!Array.isArray(itemIds)) return reply.code(400).send({ error: "invalid_order" });
-
-    const mine = getMineQueue(room.id, guest.id);
-    const currentIds = new Set(mine.map((m) => m.id));
-    const sameSet = itemIds.length === mine.length && itemIds.every((id) => currentIds.has(id));
-    if (!sameSet) return reply.code(400).send({ error: "invalid_order" });
-
-    itemIds.forEach((id, index) => {
-      db.update(queueItems)
-        .set({ minePosition: index })
-        .where(and(eq(queueItems.id, id), eq(queueItems.addedBy, guest.id), eq(queueItems.status, "mine")))
-        .run();
-    });
+    if (!reorderMineQueue(room.id, guest.id, req.body?.itemIds)) return reply.code(400).send({ error: "invalid_order" });
 
     broadcastRotationState(getIO(), room);
+    return { ok: true };
+  });
+
+  // Host (and co-hosts / anyone with drafting power): reorder a guest's own queue from the Queues board.
+  app.patch<{ Params: { code: string; guestId: string }; Body: OrderBody }>("/rooms/:code/guests/:guestId/mine/order", async (req, reply) => {
+    const room = getRoomByCode(req.params.code);
+    if (!room) return reply.code(404).send({ error: "room_not_found" });
+    const actor = requirePerm(req, room, "approve");
+    if (!actor) return reply.code(403).send({ error: "forbidden" });
+    const target = getGuestById(req.params.guestId);
+    if (!target || target.roomId !== room.id || target.kickedAt) return reply.code(404).send({ error: "guest_not_found" });
+    if (!reorderMineQueue(room.id, target.id, req.body?.itemIds)) return reply.code(400).send({ error: "invalid_order" });
+
+    const io = getIO();
+    recordAction(io, room, { actor: actorLabelFor(actor), action: "reorder_queue", detail: target.nickname });
+    emitToGuest(io, room.code, target.id, SOCKET_EVENTS.TOAST, {
+      id: crypto.randomUUID(),
+      message: "🎧 The host rearranged your queue",
+      guestVisible: true,
+    });
+    broadcastRotationState(io, room);
     return { ok: true };
   });
 
@@ -275,6 +289,52 @@ export const rotationRoutes: FastifyPluginAsync = async (app) => {
       return { ok: true };
     },
   );
+
+  // ---- Fight for a spot (§11, D10) ----
+
+  // Put a song from your own queue up for a fight. It starts by itself once another guest is in.
+  app.post<{ Params: { code: string; id: string } }>("/rooms/:code/mine/:id/fight", async (req, reply) => {
+    const room = getRoomByCode(req.params.code);
+    if (!room) return reply.code(404).send({ error: "room_not_found" });
+    if (room.status !== "active") return reply.code(400).send({ error: "room_ended" });
+    const guest = getActiveGuest(req, room);
+    if (!guest) return reply.code(401).send({ error: "not_joined" });
+    const result = enterFight(room.id, guest.id, req.params.id);
+    if (!result.ok) return reply.code(400).send({ error: result.error, message: FIGHT_BLOCKER_TEXT[result.error] });
+    const io = getIO();
+    if (result.balance !== null) {
+      const payload: TokenUpdatePayload = { guestId: guest.id, balance: result.balance, delta: -result.item.paid, reason: "contest_entry" };
+      emitToGuest(io, room.code, guest.id, SOCKET_EVENTS.TOKEN_UPDATE, payload);
+    }
+    broadcastRotationState(io, room);
+    broadcastContestPool(io, room);
+    const started = maybeStartFight(io, room);
+    return { ok: true, started };
+  });
+
+  // Take it back out (refunded) while it's waiting; not mid-vote.
+  app.delete<{ Params: { code: string; id: string } }>("/rooms/:code/mine/:id/fight", async (req, reply) => {
+    const room = getRoomByCode(req.params.code);
+    if (!room) return reply.code(404).send({ error: "room_not_found" });
+    const guest = getActiveGuest(req, room);
+    if (!guest) return reply.code(401).send({ error: "not_joined" });
+    const entry = getPoolEntryForGuest(room.id, guest.id);
+    if (!entry || entry.queueItemId !== req.params.id) return reply.code(404).send({ error: "not_in_fight" });
+    const running = getRunningContest(room.id);
+    if (running && JSON.stringify(running.meta).includes(entry.id)) {
+      return reply.code(409).send({ error: "fighting_now", message: "It's in a fight right now: the vote decides." });
+    }
+    const left = leaveFight(entry.id, "refund_reject");
+    if (!left) return reply.code(404).send({ error: "not_in_fight" });
+    const io = getIO();
+    if (left.balance !== null) {
+      const payload: TokenUpdatePayload = { guestId: guest.id, balance: left.balance, delta: left.refunded, reason: "refund_reject" };
+      emitToGuest(io, room.code, guest.id, SOCKET_EVENTS.TOKEN_UPDATE, payload);
+    }
+    broadcastRotationState(io, room);
+    broadcastContestPool(io, room);
+    return { ok: true };
+  });
 
   // ---- Auto + veto (§9) ----
 

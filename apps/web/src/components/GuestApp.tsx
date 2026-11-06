@@ -15,6 +15,10 @@ import { useCan, useCanAny } from "../hooks/useCan";
 import { useRoomStore } from "../store/roomStore";
 import { SheetManagerProvider } from "./sheets/SheetManager";
 import { castBallot } from "../lib/votes";
+import { HostNoteOverlay, useHostNote } from "./HostNoteOverlay";
+import { GlitchLayer } from "./GlitchLayer";
+import { useGlitchController } from "./GlitchController";
+import { HolidayDecor } from "./Holiday";
 
 type TabId = "now" | "search" | "queue" | "me" | "approve" | "people" | "games";
 
@@ -53,13 +57,15 @@ interface GuestAppProps {
 
 export function GuestApp({ code, guest }: GuestAppProps) {
   const [tab, setTab] = useState<TabId>("search");
+  const hostNote = useHostNote(code, tab);
+  useGlitchController(code, tab);
   const myRole = useRoomStore((s) => s.myRole);
   const isCohost = myRole === "cohost";
   const myPerms = useRoomStore((s) => s.myPerms);
   const mode = useRoomStore((s) => s.settings?.mode ?? "shared");
   // Co-hosts hold every permission; anyone else gets only the tabs for what the host gave them.
   const canApprove = useCan("approve");
-  const canPeople = useCanAny(["tokens", "moderation"]);
+  const canPeople = useCanAny(["tokens", "moderation", "glitch"]);
 
   const tabs = [
     GUEST_TABS[0],
@@ -101,6 +107,9 @@ export function GuestApp({ code, guest }: GuestAppProps) {
         <img src="/logo-text.png" alt="ManyQueue" className="h-5 w-auto" />
       </div>
       <GuestToasts />
+      {hostNote.note && <HostNoteOverlay note={hostNote.note} onDone={hostNote.dismiss} />}
+      <GlitchLayer />
+      <HolidayDecor variant="phone" />
 
       {isCohost ? (
         <div className="fixed left-3 top-3 z-40 flex items-center gap-1 rounded-full bg-accent-700/60 px-3 py-1.5 text-xs font-semibold text-accent-100">

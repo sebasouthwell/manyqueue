@@ -36,6 +36,27 @@ function actionsOfType<T extends PlayerAction["type"]>(actions: PlayerAction[], 
 }
 
 describe("player state machine", () => {
+  it("takes over from Spotify's own autoplay as soon as the room has a song (no wait for that track to end)", () => {
+    // The room ran dry (no fallback playlist) and Spotify carried on by itself: we're tracking its song.
+    let state: PlayerState = { ...createInitialPlayerState(DEVICE_ID, DEVICE_NAME), currentTrackUri: "spotify:track:autoplay", isPlaying: true };
+    // Still nothing of ours: leave Spotify alone.
+    const idle = step(state, poll({ trackUri: "spotify:track:autoplay", progressMs: 30_000, durationMs: 200_000 }), []);
+    expect(actionsOfType(idle.actions, "spotify:play")).toHaveLength(0);
+    state = idle.state;
+    // A guest adds a song: it starts now, mid-autoplay.
+    const queue: QueueSnapshotItem[] = [{ id: "q1", trackUri: "spotify:track:ours", durationMs: 200_000 }];
+    const { state: next, actions } = step(state, poll({ trackUri: "spotify:track:autoplay", progressMs: 40_000, durationMs: 200_000 }), queue);
+    expect(actionsOfType(actions, "spotify:play")).toEqual([{ type: "spotify:play", deviceId: DEVICE_ID, uri: "spotify:track:ours" }]);
+    expect(next.lockedQueueItemId).toBe("q1");
+  });
+
+  it("doesn't restart the room's own song when Spotify is already playing it", () => {
+    const state: PlayerState = { ...createInitialPlayerState(DEVICE_ID, DEVICE_NAME), currentTrackUri: "spotify:track:ours", isPlaying: true };
+    const queue: QueueSnapshotItem[] = [{ id: "q1", trackUri: "spotify:track:ours", durationMs: 200_000 }];
+    const { actions } = step(state, poll({ trackUri: "spotify:track:ours", progressMs: 10_000, durationMs: 200_000 }), queue);
+    expect(actionsOfType(actions, "spotify:play")).toHaveLength(0);
+  });
+
   it("starts the first queued track when idle", () => {
     const state = createInitialPlayerState(DEVICE_ID, DEVICE_NAME);
     const queue: QueueSnapshotItem[] = [{ id: "q1", trackUri: "spotify:track:a", durationMs: 200_000 }];

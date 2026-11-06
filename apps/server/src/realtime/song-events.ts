@@ -6,6 +6,7 @@ import { getRoomSettings } from "../db/settings.js";
 import { announceDedication } from "./moments.js";
 import { startCasualGuess, startGuessVote } from "./guess.js";
 import { getRunningContest, startContest } from "./contest.js";
+import { maybeStartFight } from "./fight.js";
 import { gameSpacing, songsFinished } from "./game-rules.js";
 import { recordAction } from "./action-log-broadcast.js";
 import { announceNextNickname } from "./ai-nicknames.js";
@@ -16,13 +17,19 @@ import { onSongStartedScene } from "./scenes.js";
  * dedication splash, the mystery-pick guess vote, and (if the room turned it
  * on) a casual "who queued this?" on roughly one ordinary song in five.
  */
-export function onSongStarted(io: Server, room: Room, item: QueueItem, random: () => number = Math.random): void {
-  announceDedication(io, room, item, { splash: true });
+export function onSongStarted(
+  io: Server,
+  room: Room,
+  item: QueueItem,
+  random: () => number = Math.random,
+  opts: { skipDedication?: boolean } = {},
+): void {
+  if (!opts.skipDedication) announceDedication(io, room, item, { splash: true });
   announceNextNickname(io, room, item);
   onSongStartedScene(io, room);
   startGuessVote(io, room, item);
   if (getRoomSettings(room.id).quickGuess && rollQuickGuess(random)) startCasualGuess(io, room, item);
-  maybeAutoContest(io, room);
+  if (!maybeAutoContest(io, room)) maybeStartFight(io, room);
 }
 
 /**

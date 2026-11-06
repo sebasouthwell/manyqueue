@@ -1,3 +1,4 @@
+import { forgetRemovedItem } from "../realtime/player-loop.js";
 import type { FastifyPluginAsync } from "fastify";
 import {
   SOCKET_EVENTS,
@@ -65,6 +66,7 @@ export const moderationRoutes: FastifyPluginAsync = async (app) => {
           emitToGuest(io, room.code, target.id, SOCKET_EVENTS.TOKEN_UPDATE, payload);
         }
         removeQueuedItem(item.id);
+        forgetRemovedItem(room.code, item.id);
       }
 
       // A song of theirs waiting in the contest pool goes too (its token back),

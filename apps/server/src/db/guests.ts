@@ -54,6 +54,11 @@ export function createGuest(
     deviceId: device.deviceId,
     lastIp: device.ip,
     kickedAt: null,
+    hostNote: null,
+    glitchLevel: 0,
+    glitchDurationSec: null,
+    glitchArmed: false,
+    glitchStartedAt: null,
     lastSeenAt: now,
     createdAt: now,
   };

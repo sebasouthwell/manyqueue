@@ -1,3 +1,4 @@
+import { albumNameOf } from "../spotify.js";
 import crypto from "node:crypto";
 import { and, eq, inArray, isNotNull, desc, sql } from "drizzle-orm";
 import { db, type DB, type DBOrTx } from "./client.js";
@@ -137,6 +138,7 @@ function buildQueueItem(
     trackName: string;
     artistName: string;
     albumArtUrl: string | null;
+    albumName?: string | null;
     durationMs: number;
     addedBy: string | null;
     source?: QueueItem["source"];
@@ -156,6 +158,7 @@ function buildQueueItem(
     trackName: params.trackName,
     artistName: params.artistName,
     albumArtUrl: params.albumArtUrl,
+    albumName: params.albumName ?? albumNameOf(params.trackUri),
     durationMs: params.durationMs,
     addedBy: params.addedBy,
     source: params.source ?? "queue",
@@ -190,6 +193,7 @@ export function addQueueItem(
     albumArtUrl: string | null;
     durationMs: number;
     addedBy: string | null;
+    albumName?: string | null;
     source?: QueueItem["source"];
     /** The host's own dedications are free (no guest, no token cost) — see the host-add route. */
     dedication?: string | null;
@@ -387,7 +391,7 @@ export function markQueueItemSkipped(id: string, nearEnd = false, database: DBOr
  * (pending) — same "hasn't started yet" semantics either way. */
 export function removeQueuedItem(itemId: string, database: DB = db): QueueItem | null {
   const item = getQueueItemById(itemId, database);
-  if (!item || (item.status !== "queued" && item.status !== "pending")) return null;
+  if (!item || (item.status !== "queued" && item.status !== "pending" && item.status !== "house")) return null;
   markQueueItemSkipped(itemId, false, database);
   return item;
 }
@@ -449,6 +453,7 @@ export function serializeQueue(roomId: string): QueueItemView[] {
       trackName: item.trackName,
       artistName: item.artistName,
       albumArtUrl: item.albumArtUrl,
+      albumName: item.albumName,
       durationMs: item.durationMs,
       position: item.position,
       status: item.status,

@@ -14,6 +14,8 @@ import { TvJamNotice } from "../components/TvJamNotice";
 import { RecapSlides } from "../components/RecapSlides";
 import { useIdle } from "../hooks/useIdle";
 import { SceneBackground } from "../components/SceneBackground";
+import { HolidayDecor, CoverDecoration, DefrostIce, HatCover, useCoverDecor } from "../components/Holiday";
+import { type DefrostPayload } from "@manyqueue/shared";
 import type { BallotView, RecapData, SceneId } from "@manyqueue/shared";
 import { formatSecs } from "../components/BallotCard";
 import { DedicationLine } from "../components/DedicationLine";
@@ -229,6 +231,30 @@ export default function TvPage() {
   const durationMs = nowPlaying?.durationMs ?? playback?.durationMs ?? 0;
   const progressPct = durationMs > 0 ? Math.min(100, (progressMs / durationMs) * 100) : 0;
 
+  // Holiday modes. November's first Mariah Carey "All I Want for Christmas Is You" of the night: the
+  // server pauses her and says so; the TV ices over, cracks and shatters, then she starts from the top.
+  const coverDecor = useCoverDecor();
+  const [defrost, setDefrost] = useState<DefrostPayload | null>(null);
+  useEffect(() => {
+    const socket = getSocket();
+    const onDefrost = (payload: DefrostPayload) => setDefrost(payload);
+    socket.on(SOCKET_EVENTS.DEFROST, onDefrost);
+    // Preview without touching Spotify: /tv?demo=defrost (add &dedication=for%20Jess&from=Sam for that version).
+    if (params.get("demo") === "defrost") {
+      const t = window.setTimeout(
+        () => setDefrost({ queueItemId: `demo-${Date.now()}`, dedication: params.get("dedication"), from: params.get("from"), durationMs: 10_000 }),
+        1500,
+      );
+      return () => {
+        clearTimeout(t);
+        socket.off(SOCKET_EVENTS.DEFROST, onDefrost);
+      };
+    }
+    return () => {
+      socket.off(SOCKET_EVENTS.DEFROST, onDefrost);
+    };
+  }, []);
+
   useEffect(() => {
     if (!room || !nowPlaying) return;
     fetch(`/rooms/${room.code}/votes/current`)
@@ -255,6 +281,8 @@ export default function TvPage() {
         className="relative flex-none bg-gradient-to-br from-bg to-section"
       >
         {started && !ended && <SceneBackground scene={demoScene ?? storedScene} />}
+        {started && !ended && <HolidayDecor variant="tv" />}
+        {defrost && <DefrostIce key={defrost.queueItemId} durationMs={defrost.durationMs} dedication={defrost.dedication} from={defrost.from} onDone={() => setDefrost(null)} />}
         {!room && !loadError && (
           <div className="absolute inset-0 flex items-center justify-center">
             <p className="text-accent-200" style={{ fontSize: 32 }}>
@@ -358,6 +386,7 @@ export default function TvPage() {
                           className="bg-gradient-to-br from-accent-700 to-accent-900 shadow-2xl"
                         />
                       )}
+                      {coverDecor(nowPlaying.trackName, nowPlaying.albumName) && <CoverDecoration kind={coverDecor(nowPlaying.trackName, nowPlaying.albumName)!} size={630} />}
                     </div>
                     <div
                       className="absolute flex flex-col"
@@ -372,6 +401,8 @@ export default function TvPage() {
                           WebkitLineClamp: 2,
                           WebkitBoxOrient: "vertical",
                           overflow: "hidden",
+                          // Clear of the skip ring in the top-right corner, so a long title wraps before it.
+                          paddingRight: 190,
                         }}
                       >
                         {nowPlaying.trackName}
@@ -476,7 +507,7 @@ export default function TvPage() {
                   {!(spotifyBlockedUntil && spotifyBlockedUntil > Date.now()) && mode !== "rotation" && sharedUpNext.map((item) => (
                     <div key={item.id} className="flex min-w-0 items-center gap-3" style={{ width: 220 }}>
                       {item.albumArtUrl ? (
-                        <img src={item.albumArtUrl} alt="" style={{ width: 56, height: 56, borderRadius: 8 }} />
+                        <HatCover trackName={item.trackName} albumName={item.albumName} size={56}><img src={item.albumArtUrl} alt="" style={{ width: 56, height: 56, borderRadius: 8 }} /></HatCover>
                       ) : (
                         <div style={{ width: 56, height: 56, borderRadius: 8 }} className="bg-accent-800" />
                       )}
@@ -510,7 +541,7 @@ export default function TvPage() {
                   {!(spotifyBlockedUntil && spotifyBlockedUntil > Date.now()) && mode === "rotation" && rotationOnDeck.map((item) => (
                     <div key={item.id} className="flex min-w-0 items-center gap-3" style={{ width: 220 }}>
                       {item.albumArtUrl ? (
-                        <img src={item.albumArtUrl} alt="" style={{ width: 56, height: 56, borderRadius: 8 }} />
+                        <HatCover trackName={item.trackName} albumName={item.albumName} size={56}><img src={item.albumArtUrl} alt="" style={{ width: 56, height: 56, borderRadius: 8 }} /></HatCover>
                       ) : (
                         <div style={{ width: 56, height: 56, borderRadius: 8 }} className="bg-accent-800" />
                       )}
@@ -617,7 +648,7 @@ function TvBallot({ ballot }: { ballot: BallotView }) {
           <div key={e.itemId} className="flex min-w-0 flex-col gap-1.5" style={{ width: 170 }}>
             <div className="flex min-w-0 items-center gap-2">
               {e.albumArtUrl ? (
-                <img src={e.albumArtUrl} alt="" style={{ width: 44, height: 44, borderRadius: 6 }} />
+                <HatCover trackName={e.trackName} size={44}><img src={e.albumArtUrl} alt="" style={{ width: 44, height: 44, borderRadius: 6 }} /></HatCover>
               ) : (
                 <div style={{ width: 44, height: 44, borderRadius: 6 }} className="bg-accent-800" />
               )}

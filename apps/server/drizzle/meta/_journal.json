@@ -176,6 +176,41 @@
       "when": 1793880707767,
       "tag": "0024_dapper_carmella_unuscione",
       "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "6",
+      "when": 1793887758836,
+      "tag": "0025_rotation_rounds",
+      "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "6",
+      "when": 1793888298585,
+      "tag": "0026_host_notes",
+      "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "6",
+      "when": 1793891214871,
+      "tag": "0027_glitch_level",
+      "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "6",
+      "when": 1793898421121,
+      "tag": "0028_glitch_state",
+      "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "6",
+      "when": 1793922720219,
+      "tag": "0029_album_name",
+      "breakpoints": true
     }
   ]
 }

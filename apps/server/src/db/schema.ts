@@ -62,6 +62,15 @@ export const guests = sqliteTable("guests", {
   deviceId: text("device_id"),
   lastIp: text("last_ip"),
   kickedAt: integer("kicked_at", { mode: "timestamp" }),
+  // A private note from the host, shown to this guest the next time they use the app (then cleared).
+  hostNote: text("host_note"),
+  // Easter egg: how glitchy the host has made this guest's app (0 = normal, 100 = maximum chaos).
+  glitchLevel: integer("glitch_level").notNull().default(0),
+  // How long a glitch runs once it starts (null = until someone stops it), whether it's waiting for the
+  // guest's next visit, and when it actually started on their phone.
+  glitchDurationSec: integer("glitch_duration_sec"),
+  glitchArmed: integer("glitch_armed", { mode: "boolean" }).notNull().default(false),
+  glitchStartedAt: integer("glitch_started_at", { mode: "timestamp" }),
   lastSeenAt: integer("last_seen_at", { mode: "timestamp" }).notNull(),
   createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
 });
@@ -94,6 +103,9 @@ export const queueItems = sqliteTable("queue_items", {
   trackName: text("track_name").notNull(),
   artistName: text("artist_name").notNull(),
   albumArtUrl: text("album_art_url"),
+  // The track's album, when known (search results and fallback tracks carry it): Christmas albums are
+  // what mark songs like "Santa Tell Me" as Christmas songs.
+  albumName: text("album_name"),
   durationMs: integer("duration_ms").notNull(),
   addedBy: text("added_by").references(() => guests.id),
   source: text("source", { enum: ["queue", "fallback"] })
@@ -101,8 +113,9 @@ export const queueItems = sqliteTable("queue_items", {
     .default("queue"),
   status: text("status", {
     // Rotation mode (the Rotation-mode design): mine = a guest's own queue, pool = the mystery lane,
-    // on_deck = drafted and waiting to play, in_fight = entered in a "fight for a spot" contest.
-    enum: ["pending", "queued", "locked", "playing", "played", "skipped", "contest", "mine", "pool", "on_deck", "in_fight"],
+    // on_deck = drafted and waiting to play, in_fight = entered in a "fight for a spot" contest,
+    // house = a song the host added, waiting to take the next house pick (before the fallback playlist).
+    enum: ["pending", "queued", "locked", "playing", "played", "skipped", "contest", "mine", "pool", "on_deck", "in_fight", "house"],
   })
     .notNull()
     .default("queued"),
@@ -114,7 +127,7 @@ export const queueItems = sqliteTable("queue_items", {
   // `position` above, which is the Shared-mode queue's ordering.
   minePosition: integer("mine_position"),
   draftedAt: integer("drafted_at", { mode: "timestamp" }),
-  draftedBy: text("drafted_by", { enum: ["rotation", "host", "crowd", "mystery", "fight"] }),
+  draftedBy: text("drafted_by", { enum: ["rotation", "host", "crowd", "mystery", "fight", "house"] }),
   addedAt: integer("added_at", { mode: "timestamp" }).notNull(),
   lockedAt: integer("locked_at", { mode: "timestamp" }),
   startedAt: integer("started_at", { mode: "timestamp" }),

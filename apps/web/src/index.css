@@ -53,3 +53,89 @@ button:focus:not(:focus-visible) {
   0% { background-position: 0% 50%; }
   100% { background-position: 200% 50%; }
 }
+
+/* ---- Glitch mode easter egg (GlitchLayer.tsx). Hard cuts only; everything is brief or cosmetic. ----
+   Filters go on the root element (html): there they don't break position:fixed (tab bar, sheets), and
+   every screen, sheet and dialog is covered. GlitchLayer sets the --mq-f-* parts it needs. */
+html.mq-glitched {
+  filter: var(--mq-f-rgb,) var(--mq-f-tear,) var(--mq-f-chan,) var(--mq-f-inv,);
+}
+.mq-scanlines {
+  opacity: calc(var(--mq-glitch, 0) * 0.3);
+  background: repeating-linear-gradient(to bottom, rgba(255, 255, 255, 0.07) 0 1px, transparent 1px 3px);
+  mix-blend-mode: overlay;
+}
+@keyframes mq-shake-kf {
+  0%, 100% { transform: translate(0, 0); }
+  25% { transform: translate(-5px, 2px); }
+  50% { transform: translate(4px, -2px); }
+  75% { transform: translate(-3px, 0); }
+}
+.mq-shake { animation: mq-shake-kf 0.24s steps(1, end); }
+@keyframes mq-stutter-kf {
+  0%, 100% { transform: none; }
+  20% { transform: translateY(-14px); }
+  40% { transform: translateY(6px); }
+  60% { transform: translateY(-22px); }
+  80% { transform: translateY(0); }
+}
+.mq-stutter body { animation: mq-stutter-kf 0.2s steps(1, end); }
+.mq-blink { opacity: 0 !important; }
+@keyframes mq-flicker {
+  0%, 91%, 94%, 100% { opacity: 1; }
+  92% { opacity: 0.35; }
+  96% { opacity: 0.7; }
+}
+.mq-broken { opacity: 0 !important; outline: 1px solid rgba(255, 255, 255, 0.25); outline-offset: -1px; }
+
+/* ---- Holiday modes (Holiday.tsx) ---- */
+@keyframes mq-snow {
+  0% { transform: translate3d(0, -20px, 0); }
+  100% { transform: translate3d(var(--drift, 0px), 110vh, 0); }
+}
+@keyframes mq-bat {
+  0% { transform: translate(0, 0); }
+  25% { transform: translate(600px, -40px); }
+  50% { transform: translate(1200px, 30px); }
+  100% { transform: translate(2200px, -20px); }
+}
+@keyframes mq-siren-bg {
+  0% { background: rgba(120, 0, 0, 0.92); }
+  100% { background: rgba(30, 0, 0, 0.92); }
+}
+@keyframes mq-siren-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* SHE IS DEFROSTING: the ice over the TV */
+@keyframes mq-frost-in {
+  from { opacity: 0; transform: scale(1.02); }
+  to { opacity: 1; transform: scale(1); }
+}
+@keyframes mq-frost-text {
+  from { opacity: 0; filter: blur(10px); transform: scale(0.96); }
+  to { opacity: 1; filter: blur(0); transform: scale(1); }
+}
+@keyframes mq-crack-draw {
+  from { stroke-dashoffset: 1; }
+  to { stroke-dashoffset: 0; }
+}
+@keyframes mq-ice-jolt0 {
+  0% { transform: translate(0, 0); }
+  20% { transform: translate(-7px, 4px); }
+  45% { transform: translate(6px, -3px); }
+  70% { transform: translate(-3px, 2px); }
+  100% { transform: translate(0, 0); }
+}
+@keyframes mq-ice-jolt1 {
+  0% { transform: translate(0, 0); }
+  20% { transform: translate(-7px, 4px); }
+  45% { transform: translate(6px, -3px); }
+  70% { transform: translate(-3px, 2px); }
+  100% { transform: translate(0, 0); }
+}
+@keyframes mq-shard-fall {
+  from { transform: translate(0, 0) rotate(0deg); opacity: 1; }
+  70% { opacity: 1; }
+  to { transform: translate(var(--dx), var(--dy)) rotate(var(--rot)); opacity: 0; }
+}

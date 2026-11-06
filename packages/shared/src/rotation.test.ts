@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   projectUpcoming,
+  applyWeightChange,
   onDeckSize,
   draft,
   openBallot,
@@ -269,7 +270,7 @@ describe("Crowd pick: openBallot / closeBallot (R10)", () => {
     const winnerGuest = result.guests.find((g) => g.id === ballot[0].ownerId)!;
     expect(winnerGuest.queue).toHaveLength(0);
     expect(winnerGuest.lastTurnAt).toBe(1000);
-    expect(winnerGuest.credit).toBeLessThan(0);
+    expect(winnerGuest.credit).toBe(0); // the one turn this round, used
   });
 
   it("self-votes count like any other vote", () => {
@@ -350,6 +351,55 @@ describe("Crowd pick: openBallot / closeBallot (R10)", () => {
       expect(ratio).toBeGreaterThan(1.6);
       expect(ratio).toBeLessThan(2.5);
     }
+  });
+});
+
+describe("draft — rounds and weights", () => {
+  /** Runs draft() one slot at a time, refilling queues, and returns the owners in order. */
+  function sequence(start: RotationGuest[], slots: number, boostedTurns: "together" | "spread" = "together") {
+    let guests = start;
+    const out: string[] = [];
+    for (let t = 0; t < slots; t++) {
+      for (const g of guests) if (g.queue.length === 0) g.queue.push(...song(g.id, 2));
+      const result = draft(baseState({ onDeckSize: 1, guests, boostedTurns }), 1000 + t * 10);
+      out.push(result.onDeck[0].ownerId!);
+      guests = result.guests;
+    }
+    return { out, guests };
+  }
+  const four = (w: number) => [guest("A", { weight: w, joinedAt: 0 }), guest("B", { joinedAt: 1 }), guest("C", { joinedAt: 2 }), guest("D", { joinedAt: 3 })];
+
+  it("×2 back to back: two songs every round from the very first, as a pair", () => {
+    expect(sequence(four(2), 15).out.join("")).toBe("AABCDAABCDAABCD");
+  });
+
+  it("×2 spread: two songs every round, never twice running", () => {
+    const { out } = sequence(four(2), 25, "spread");
+    for (let i = 1; i < out.length; i++) expect(out[i] === "A" && out[i - 1] === "A").toBe(false);
+    for (let r = 0; r < 5; r++) expect(out.slice(r * 5, r * 5 + 5).filter((x) => x === "A")).toHaveLength(2);
+  });
+
+  it("×1.5 gets 3 songs per 2 rounds; ×0.5 one every other round; ×3 never more than 3 in a row", () => {
+    expect(sequence(four(1.5), 9).out.filter((x) => x === "A")).toHaveLength(3);
+    const half = sequence(four(0.5), 7).out;
+    expect(half.filter((x) => x === "A")).toHaveLength(1);
+    expect(sequence(four(3), 24).out.join("")).not.toMatch(/AAAA/);
+  });
+
+  it("a weight raised mid-round adds the extra turn to this round (the forecast reshapes at once)", () => {
+    const { guests } = sequence(four(1), 2); // A, B have gone this round
+    const before = projectUpcoming(baseState({ guests, onDeckSize: 0 }), 4).map((s) => s.ownerId).join("");
+    expect(before).toBe("CDAB");
+    const a = guests.find((g) => g.id === "A")!;
+    Object.assign(a, applyWeightChange(a, 2)); // what setGuestWeight does on the server
+    const after = projectUpcoming(baseState({ guests, onDeckSize: 0 }), 4).map((s) => s.ownerId).join("");
+    expect(after).toBe("ACDB"); // the extra turn plays next
+  });
+
+  it("a joiner mid-round (no turns left) waits for the next round", () => {
+    const { guests } = sequence(four(1), 1); // A has gone
+    guests.push(guest("E", { joinedAt: 9, credit: 0, queue: song("E", 2) }));
+    expect(projectUpcoming(baseState({ guests, onDeckSize: 0 }), 5).map((s) => s.ownerId).join("")).toBe("BCDEA"); // E's first turn opens the next round
   });
 });
 

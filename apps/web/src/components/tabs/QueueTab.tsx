@@ -9,6 +9,7 @@ import { Emoji } from "../Emoji";
 import { HistorySheet } from "../HistorySheet";
 import { SongActionSheet } from "../SongActionSheet";
 import { SortableMineRow } from "../SortableMineRow";
+import { HatCover } from "../Holiday";
 
 /** §8's "⭐ Host boost" card — only ever rendered when myWeight is set, which the server itself only
  * ever sends above x1 (defense in depth for the "never shown below x1" privacy rule). */
@@ -23,10 +24,10 @@ function BoostRow({ weight }: { weight: number }) {
 
 /** Rotation mode's Queue tab (the Rotation-mode design §5, mockups 4a/4c): Mine is a guest's own queue
  * (reorder with the same up/down pattern the host desk already uses), Room is on deck + the rotation
- * order. Song extras (dedicate, mystery pool, move to top, remove) live in the song action sheet;
- * fight for a spot isn't in it yet — see SongActionSheet's note. */
+ * order. Song extras (dedicate, mystery pool, fight for a spot, move to top, remove) live in the song
+ * action sheet. */
 /** The main queue past on deck: a live forecast from everyone's personal queues (server-side
- * projectUpcoming). Other guests' titles are private (§12), so their slots show only who. Your own
+ * projectUpcoming). Other guests' songs show when the host has "show the songs coming up" on (the default); otherwise only who. Your own
  * slots are drafted in your queue's order, so the nth "you" slot is the nth song in your list. */
 function UpcomingList({
   startAt,
@@ -63,10 +64,30 @@ function UpcomingList({
                 <p className="flex items-center gap-1 truncate text-sm text-accent-200">
                   <DiceFive size={14} /> House music until someone adds a song
                 </p>
+              ) : slot.kind === "host" ? (
+                <>
+                  <p className="truncate text-sm text-accent-100">{slot.trackName ?? "The host's pick"}</p>
+                  <p className="flex items-center gap-1 truncate text-xs text-accent-300">
+                    <Emoji value="🏠" size={12} /> Host's pick{slot.artistName ? ` · ${slot.artistName}` : ""}
+                  </p>
+                </>
               ) : isMe ? (
                 <>
                   <p className="truncate text-sm text-accent-100">{song?.trackName ?? "Your next song"}</p>
                   <p className="truncate text-xs text-accent-300">{song ? `${song.artistName} · you` : "you"}</p>
+                </>
+              ) : slot.trackName ? (
+                <>
+                  <p className="truncate text-sm text-accent-100">{slot.trackName}</p>
+                  <p className="flex items-center gap-1 truncate text-xs text-accent-300">
+                    {slot.artistName}
+                    {slot.addedBy && (
+                      <>
+                        {" · "}
+                        <Emoji value={slot.addedBy.emoji} size={12} /> {slot.addedBy.nickname}
+                      </>
+                    )}
+                  </p>
                 </>
               ) : (
                 <p className="flex items-center gap-1 truncate text-sm text-accent-200">
@@ -94,8 +115,10 @@ function RotationQueueView({ code, guestId, onShowHistory }: { code: string; gue
   const rotationRoom = useRoomStore((s) => s.rotationRoom);
   const myWeight = useRoomStore((s) => s.myWeight);
 
-  const ordered = mine.filter((m) => !m.inPool);
+  const ordered = mine.filter((m) => !m.inPool && !m.inFight);
   const pooled = mine.find((m) => m.inPool) ?? null;
+  const fighting = mine.find((m) => m.inFight) ?? null;
+  const [fightError, setFightError] = useState<string | null>(null);
   const actionItem = actionsFor ? mine.find((m) => m.id === actionsFor) ?? null : null;
 
   const dragSensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
@@ -115,8 +138,17 @@ function RotationQueueView({ code, guestId, onShowHistory }: { code: string; gue
     const newIndex = ordered.findIndex((m) => m.id === over.id);
     if (oldIndex === -1 || newIndex === -1) return;
     const reordered = arrayMove(ordered, oldIndex, newIndex);
-    setMine(pooled ? [...reordered, pooled] : reordered); // optimistic — mine:update confirms it shortly after
+    setMine([...reordered, ...mine.filter((m) => m.inPool || m.inFight)]); // optimistic — mine:update confirms it shortly after
     persistOrder(reordered.map((m) => m.id));
+  }
+
+  async function leaveFight(itemId: string) {
+    setFightError(null);
+    const res = await fetch(`/rooms/${code}/mine/${itemId}/fight`, { method: "DELETE" }).catch(() => null);
+    if (!res?.ok) {
+      const j = res ? ((await res.json().catch(() => null)) as { message?: string } | null) : null;
+      setFightError(j?.message ?? "Couldn't take it out — try again.");
+    }
   }
 
   async function pullFromPool(itemId: string) {
@@ -190,7 +222,7 @@ function RotationQueueView({ code, guestId, onShowHistory }: { code: string; gue
           {pooled && (
             <div className="flex items-center gap-3 rounded-md bg-section p-2">
               {pooled.albumArtUrl ? (
-                <img src={pooled.albumArtUrl} alt="" className="h-11 w-11 rounded" />
+                <HatCover trackName={pooled.trackName} size={44}><img src={pooled.albumArtUrl} alt="" className="h-11 w-11 rounded" /></HatCover>
               ) : (
                 <div className="h-11 w-11 rounded bg-accent-800" />
               )}
@@ -208,7 +240,29 @@ function RotationQueueView({ code, guestId, onShowHistory }: { code: string; gue
               </button>
             </div>
           )}
-          {ordered.length === 0 && !pooled && (
+          {fighting && (
+            <div className="flex flex-col gap-1 rounded-md bg-section p-2 shadow-[0_0_0_1px_rgb(var(--color-accent-700))]">
+              <div className="flex items-center gap-3">
+                {fighting.albumArtUrl ? (
+                  <HatCover trackName={fighting.trackName} size={44}><img src={fighting.albumArtUrl} alt="" className="h-11 w-11 rounded" /></HatCover>
+                ) : (
+                  <div className="h-11 w-11 rounded bg-accent-800" />
+                )}
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-sm text-accent-100">{fighting.trackName}</p>
+                  <p className="truncate text-xs text-accent-300">⚔️ Up for a fight: it starts when someone takes you on</p>
+                </div>
+                <button
+                  onClick={() => leaveFight(fighting.id)}
+                  className="whitespace-nowrap rounded-full border border-accent-700 px-2.5 py-1 text-xs font-medium text-accent-100"
+                >
+                  Take it out
+                </button>
+              </div>
+              {fightError && <p className="text-xs text-accent-200">{fightError}</p>}
+            </div>
+          )}
+          {ordered.length === 0 && !pooled && !fighting && (
             <p className="text-accent-300 text-center text-sm">Your queue's empty — add something in Search!</p>
           )}
           <DndContext sensors={dragSensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
@@ -236,7 +290,7 @@ function RotationQueueView({ code, guestId, onShowHistory }: { code: string; gue
             {rotationRoom?.onDeck.map((item) => (
               <div key={item.id} className="flex items-center gap-3 rounded-md bg-section p-2">
                 {item.albumArtUrl ? (
-                  <img src={item.albumArtUrl} alt="" className="h-11 w-11 rounded" />
+                  <HatCover trackName={item.trackName} albumName={item.albumName} size={44}><img src={item.albumArtUrl} alt="" className="h-11 w-11 rounded" /></HatCover>
                 ) : (
                   <div className="h-11 w-11 rounded bg-accent-800" />
                 )}
@@ -353,7 +407,7 @@ export function QueueTab({ code, guestId }: { code: string; guestId: string }) {
               {item.position}
             </span>
             {item.albumArtUrl ? (
-              <img src={item.albumArtUrl} alt="" className="h-11 w-11 rounded" />
+              <HatCover trackName={item.trackName} albumName={item.albumName} size={44}><img src={item.albumArtUrl} alt="" className="h-11 w-11 rounded" /></HatCover>
             ) : (
               <div className="h-11 w-11 rounded bg-accent-800" />
             )}

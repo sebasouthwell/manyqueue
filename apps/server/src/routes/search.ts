@@ -5,7 +5,7 @@ import { getRoomByCode } from "../db/rooms.js";
 import { getRoomSettings } from "../db/settings.js";
 import { listBannedUris } from "../db/bans.js";
 import { countPlaysTonight } from "../db/queue.js";
-import { searchTracks, SpotifyQuotaError } from "../spotify.js";
+import { searchTracks, rememberAlbumNames, SpotifyQuotaError } from "../spotify.js";
 import { getActiveGuest, getAuthenticatedHost } from "../auth-helpers.js";
 
 interface CachedSearch {
@@ -75,11 +75,13 @@ export const searchRoutes: FastifyPluginAsync = async (app) => {
       const cached = searchCache.get(cacheKey);
       if (cached) {
         req.log.info({ cacheKey }, "search cache hit");
+        rememberAlbumNames(cached.tracks);
         return priceResults(cached);
       }
 
       try {
         const { tracks, total } = await searchTracks(room.hostId, q, offset, 10);
+        rememberAlbumNames(tracks);
         const cacheEntry: CachedSearch = { tracks, total };
         searchCache.set(cacheKey, cacheEntry);
         req.log.info({ cacheKey }, "search cache miss — fetched from Spotify");

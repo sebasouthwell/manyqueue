@@ -3,7 +3,7 @@ import { getRoomByCode } from "../db/rooms.js";
 import { getGuestById } from "../db/guests.js";
 import { requirePerm } from "../auth-helpers.js";
 import { getIO } from "../realtime/io-instance.js";
-import { isAiConfigured } from "../ai/deepseek.js";
+import { isAiConfigured } from "../ai/provider.js";
 import { approveNickname, hideNickname, regenerateNickname, staffNicknames } from "../realtime/ai-nicknames.js";
 
 // Whoever approves songs or moderates (the host, co-hosts, or a guest holding one of those) runs the AI nicknames.

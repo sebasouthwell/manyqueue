@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Operator CLI for ManyQueue rooms (list / close), for scripts or by hand.
+// Operator CLI for ManyQueue rooms and guests, for scripts or by hand.
 //
 //   node scripts/rooms.mjs                    active rooms as JSON [{id,label,sub}] (the group's list)
 //   node scripts/rooms.mjs status  <CODE>     mode, speaker, now playing, on deck, rotation order, guests
@@ -7,6 +7,9 @@
 //   node scripts/rooms.mjs pause   <CODE> | resume <CODE>
 //   node scripts/rooms.mjs mode    <CODE> shared|rotation
 //   node scripts/rooms.mjs end     <CODE>     end the party (same as the host's End button)
+//   node scripts/rooms.mjs guests             everyone in an active party as JSON [{id:"CODE:guestId",label,sub}]
+//   node scripts/rooms.mjs note    <CODE:guestId> "<message>"   leave a secret host note ("" clears it)
+//   node scripts/rooms.mjs glitch  <CODE:guestId> <0-100>       glitch mode easter egg (0 = off)
 //
 // Reads go straight to the SQLite file, read-only. Anything that changes a room goes through the running
 // server's own API as that room's host (a host_session cookie signed with COOKIE_SECRET), so the player
@@ -55,6 +58,31 @@ function list() {
     return { id: room.code, label: `${room.code} · ${room.name}`, sub: bits.join(" · ") };
   });
   console.log(JSON.stringify(out));
+}
+
+/** Everyone in an active party, one item per guest, id "CODE:guestId" (for picking a guest in operator tools). */
+function guestList() {
+  const rows = all(
+    `select r.code, g.id, g.nickname, g.emoji, g.role, g.host_note note from guests g join rooms r on r.id = g.room_id
+      where r.status = 'active' and g.kicked_at is null order by r.created_at desc, g.created_at`,
+  );
+  console.log(
+    JSON.stringify(
+      rows.map((g) => ({
+        id: `${g.code}:${g.id}`,
+        label: `${g.emoji} ${g.nickname}${g.role === "cohost" ? " ★" : ""}`,
+        sub: [g.code, g.note ? "💌 note waiting" : null].filter(Boolean).join(" · "),
+      })),
+    ),
+  );
+}
+
+function guestOrFail(item) {
+  const [code, guestId] = (item ?? "").split(":");
+  const room = roomOrFail(code);
+  const guest = one("select id, nickname, emoji from guests where id = ? and room_id = ? and kicked_at is null", guestId ?? "", room.id);
+  if (!guest) fail(`no guest ${guestId} in ${code}`);
+  return { room, guest };
 }
 
 function status(code) {
@@ -107,8 +135,8 @@ function status(code) {
 }
 
 function hostCookie(room) {
-  const secret = process.env.COOKIE_SECRET ?? process.env.COOKIE_SECRET_TOKEN;
-  if (!secret) fail("COOKIE_SECRET (or COOKIE_SECRET_TOKEN) is not set: run this with the server's environment (.env)");
+  const secret = process.env.COOKIE_SECRET;
+  if (!secret) fail("COOKIE_SECRET is not set: run this with the server's environment (.env)");
   const sig = crypto.createHmac("sha256", secret).update(room.host_id).digest("base64").replace(/=+$/, "");
   return `host_session=${encodeURIComponent(`${room.host_id}.${sig}`)}`;
 }
@@ -152,9 +180,32 @@ switch (cmd ?? "list") {
     await asHost(roomOrFail(code), "POST", `/rooms/${code}/end`);
     console.log(`${code} ended`);
     break;
+  case "guests":
+    guestList();
+    break;
+  case "note": {
+    const { room, guest } = guestOrFail(code);
+    const r = await asHost(room, "PUT", `/rooms/${room.code}/guests/${guest.id}/note`, { message: arg ?? "" });
+    console.log(
+      r.hostNote
+        ? `💌 Left for ${guest.emoji} ${guest.nickname}: they'll see it the next time they use the app.`
+        : `Removed the note for ${guest.emoji} ${guest.nickname}.`,
+    );
+    break;
+  }
+  case "glitch": {
+    const { room, guest } = guestOrFail(code);
+    const level = Number(arg);
+    if (!Number.isFinite(level) || level < 0 || level > 100) fail("usage: rooms.mjs glitch <CODE:guestId> <0-100>");
+    const r = await asHost(room, "PUT", `/rooms/${room.code}/guests/${guest.id}/glitch`, { level });
+    console.log(r.level ? `🌀 ${guest.emoji} ${guest.nickname} is glitching at ${r.level}. It starts faint and creeps up.` : `${guest.emoji} ${guest.nickname} is back to normal.`);
+    break;
+  }
   case "help":
-    console.log("list | status <CODE> | skip <CODE> | pause <CODE> | resume <CODE> | mode <CODE> shared|rotation | end <CODE>");
+    console.log(
+      "list | status <CODE> | skip <CODE> | pause <CODE> | resume <CODE> | mode <CODE> shared|rotation | end <CODE> | guests | note <CODE:guestId> <message>",
+    );
     break;
   default:
-    fail(`unknown command ${cmd}: list | status | skip | pause | resume | mode | end`);
+    fail(`unknown command ${cmd}: list | status | skip | pause | resume | mode | end | guests | note`);
 }

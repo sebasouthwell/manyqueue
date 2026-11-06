@@ -11,7 +11,9 @@ import {
 import { getActiveGuest, requireRole } from "../auth-helpers.js";
 import { getRoomByCode } from "../db/rooms.js";
 import { getRoomSettings } from "../db/settings.js";
-import { findActiveItemByTrackUri } from "../db/queue.js";
+import { findActiveItemByTrackUri, getQueueItemById } from "../db/queue.js";
+import { leaveFight } from "../db/fight.js";
+import { broadcastRotationState } from "../realtime/rotation-views.js";
 import { InsufficientTokensError, balance } from "../db/tokens.js";
 import {
   AlreadyInPoolError,
@@ -52,6 +54,8 @@ export const contestRoutes: FastifyPluginAsync = async (app) => {
     if (!guest) return reply.code(401).send({ error: "not_joined" });
     const guestId = guest.id;
     if (guest.muted) return reply.code(403).send({ error: "muted" });
+    // Rotation mode has Fight for a spot instead, from a song already in your own queue.
+    if (getRoomSettings(room.id).mode === "rotation") return reply.code(400).send({ error: "use_fight" });
 
     const { trackUri, name, artistName, albumArtUrl, durationMs, explicit } = req.body ?? {};
     if (!trackUri || !name || !artistName || typeof durationMs !== "number") {
@@ -153,12 +157,17 @@ export const contestRoutes: FastifyPluginAsync = async (app) => {
     const running = getRunningContest(room.id);
     if (running && JSON.stringify(running.meta).includes(entry.id)) return reply.code(409).send({ error: "in_contest" });
 
-    const removed = removePoolEntry(entry.id, "refund_reject", getRoomSettings(room.id).tokenCap);
+    // A Rotation fight entry goes back to its owner's queue instead of being dropped.
+    const fight = getQueueItemById(entry.queueItemId)?.status === "in_fight" ? leaveFight(entry.id, "refund_reject") : null;
+    const removed = fight
+      ? { item: fight.item, balance: fight.balance }
+      : removePoolEntry(entry.id, "refund_reject", getRoomSettings(room.id).tokenCap);
     if (!removed) return reply.code(404).send({ error: "entry_not_found" });
+    if (fight) broadcastRotationState(getIO(), room);
 
     const io = getIO();
     if (removed.balance !== null) {
-      const payload: TokenUpdatePayload = { guestId: entry.enteredBy, balance: removed.balance, delta: removed.item.paid, reason: "refund_reject" };
+      const payload: TokenUpdatePayload = { guestId: entry.enteredBy, balance: removed.balance, delta: fight ? fight.refunded : removed.item.paid, reason: "refund_reject" };
       emitToGuest(io, room.code, entry.enteredBy, SOCKET_EVENTS.TOKEN_UPDATE, payload);
     }
     const toast: ToastPayload = { id: crypto.randomUUID(), message: `Token refunded for "${removed.item.trackName}"`, guestVisible: true };

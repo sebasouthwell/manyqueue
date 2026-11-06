@@ -120,6 +120,16 @@ export interface SpeakerStatusPayload {
   movedToDeviceName: string | null;
 }
 
+/** SHE IS DEFROSTING. Spotify is held paused for `durationMs` while the TV ices over and shatters. */
+export interface DefrostPayload {
+  queueItemId: string;
+  /** The song's dedication, shown in place of the warning. */
+  dedication: string | null;
+  /** Who dedicated it (null when anonymous or no dedication). */
+  from: string | null;
+  durationMs: number;
+}
+
 export interface RoomEndedPayload {
   songCount: number;
   playlistUrl: string | null;
@@ -154,6 +164,8 @@ export const SOCKET_EVENTS = {
   VOTE_OPENED: "vote:opened",
   VOTE_CLOSED: "vote:closed",
   ROOM_ENDED: "room:ended",
+  /** To the room: the November Mariah moment (ice over the TV, then she starts from the top). */
+  DEFROST: "holiday:defrost",
   ROOM_EXPORT: "room:export",
   SPOTIFY_STATUS: "spotify:status",
   SETTINGS_UPDATE: "settings:update",
@@ -178,6 +190,8 @@ export const SOCKET_EVENTS = {
   /** Rotation mode: to one guest, privately — their own turn weight, for the "⭐ boost" card (§8: only
    * shown above ×1; a weight below ×1 is never revealed to the guest it belongs to). */
   MY_WEIGHT_UPDATE: "weight:mine",
+  /** To one guest, privately: how glitchy the host has made their app (easter egg). */
+  GLITCH_UPDATE: "glitch:mine",
   /** Rotation mode: to everyone — on deck plus the rotation order, counts only. */
   ROTATION_UPDATE: "rotation:update",
   /** Rotation mode: to the host and co-hosts only — the full Queues board with real song titles. */

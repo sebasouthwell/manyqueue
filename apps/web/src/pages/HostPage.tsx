@@ -86,16 +86,33 @@ export default function HostPage() {
       .catch(() => setAuth({ status: "logged_out" }));
   }, [params]);
 
+  // Tonight's room if one is already running; otherwise the host picks how the queue works first.
+  const [choosingMode, setChoosingMode] = useState(false);
+  const [starting, setStarting] = useState(false);
   useEffect(() => {
     if (auth.status !== "logged_in") return;
-    fetch("/rooms", { method: "POST" })
+    fetch("/rooms/current")
       .then(async (res) => {
+        if (res.status === 404) return setChoosingMode(true);
         if (!res.ok) return;
         const data = await res.json();
         setRoom(data.room);
       })
       .catch(() => {});
   }, [auth.status]);
+
+  async function startRoom(mode: "shared" | "rotation") {
+    setStarting(true);
+    try {
+      const res = await fetch("/rooms", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode }) });
+      if (!res.ok) return;
+      const data = await res.json();
+      setChoosingMode(false);
+      setRoom(data.room);
+    } finally {
+      setStarting(false);
+    }
+  }
 
   useRoomConnection(room?.code ?? null, "host");
   const settings = useRoomStore((s) => s.settings);
@@ -184,7 +201,33 @@ export default function HostPage() {
         </div>
       )}
 
-      {auth.status === "logged_in" && !ended && !room && (
+      {auth.status === "logged_in" && !ended && !room && choosingMode && (
+        <div className="flex min-h-screen w-full max-w-md flex-col justify-center gap-4 py-10">
+          <div className="text-center">
+            <img src="/logo-mark.png" alt="" className="mx-auto mb-4 h-12 w-auto" />
+            <h1 className="text-2xl font-bold text-accent-100">How should the queue work tonight?</h1>
+            <p className="mt-1 text-sm text-accent-300">You can switch later in Settings.</p>
+          </div>
+          <button
+            disabled={starting}
+            onClick={() => void startRoom("rotation")}
+            className="flex flex-col items-start gap-1 rounded-lg bg-panel p-4 text-left ring-1 ring-panel-line hover:ring-accent disabled:opacity-60"
+          >
+            <span className="text-base font-semibold text-accent-100">🔄 Rotation</span>
+            <span className="text-sm text-accent-300">Everyone keeps their own little queue and takes turns, one song each per round. Fair by design, no tokens needed.</span>
+          </button>
+          <button
+            disabled={starting}
+            onClick={() => void startRoom("shared")}
+            className="flex flex-col items-start gap-1 rounded-lg bg-panel p-4 text-left ring-1 ring-panel-line hover:ring-accent disabled:opacity-60"
+          >
+            <span className="text-base font-semibold text-accent-100">📜 Shared</span>
+            <span className="text-sm text-accent-300">One queue for the whole room. Guests spend tokens to add songs and can vote to skip.</span>
+          </button>
+        </div>
+      )}
+
+      {auth.status === "logged_in" && !ended && !room && !choosingMode && (
         <div className="flex min-h-screen flex-col items-center justify-center gap-4">
           <img src="/logo-mark.png" alt="" className="h-14 w-auto animate-pulse" />
           <p className="text-accent-200">Setting up your room…</p>

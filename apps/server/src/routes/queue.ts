@@ -20,6 +20,7 @@ import { isTrackBanned } from "../db/bans.js";
 import {
   addPaidQueueItem,
   addQueueItem,
+  getOnDeckItems,
   findActiveItemByTrackUri,
   countPlaysTonight,
   getLastAddedAtMs,
@@ -29,6 +30,12 @@ import {
   serializeHistory,
 } from "../db/queue.js";
 import { getRoomSettings } from "../db/settings.js";
+import { getHouseItems, getPoolItems, placeHostSong, setHostPickSlot } from "../db/rotation.js";
+import { refillOnDeck, forecastUpcoming } from "../realtime/rotation-loop.js";
+import { db as database } from "../db/client.js";
+import { queueItems } from "../db/schema.js";
+import { eq } from "drizzle-orm";
+import { broadcastRotationState } from "../realtime/rotation-views.js";
 import { getTrackInfo } from "../spotify.js";
 import { balance, InsufficientTokensError } from "../db/tokens.js";
 import { getIO } from "../realtime/io-instance.js";
@@ -48,6 +55,10 @@ interface AddBody {
   dedication?: string | null;
   /** Queue it as a mystery pick (+1 token, +1 back if nobody guesses). */
   anonymous?: boolean;
+  /** Rotation mode, host adds: "next" plays it straight after the current song (skips the queue);
+   * "house" (default) takes the next house pick, ahead of the fallback playlist; "pin" puts it at the
+   * end of Coming up, where the host can drag it to any slot. */
+  placement?: "next" | "house" | "pin";
 }
 
 export const queueRoutes: FastifyPluginAsync = async (app) => {
@@ -224,6 +235,41 @@ export const queueRoutes: FastifyPluginAsync = async (app) => {
         dedicationText = checked.text;
       }
 
+      // Rotation mode has no shared queue to add to: the host has no turn of their own, so their song either
+      // jumps the queue or waits for the next house pick (replacing a fallback track already up next).
+      if (getRoomSettings(room.id).mode === "rotation") {
+        const asked = req.body?.placement;
+        const placement = asked === "next" ? "next" : "house";
+        const waiting = [...getHouseItems(room.id), ...getOnDeckItems(room.id), ...getPoolItems(room.id)];
+        if (waiting.some((w) => w.trackUri === trackUri)) return reply.code(409).send({ error: "duplicate" });
+        const added = addQueueItem({
+          roomId: room.id,
+          trackUri,
+          trackName: name,
+          artistName,
+          albumArtUrl: albumArtUrl ?? null,
+          durationMs,
+          addedBy: null,
+          dedication: dedicationText,
+        });
+        if (asked === "pin") {
+          database.update(queueItems).set({ status: "house", paid: 0 }).where(eq(queueItems.id, added.id)).run();
+          const slots = forecastUpcoming(room).filter((s) => s.kind !== "house").length;
+          setHostPickSlot(room.id, added.id, slots);
+        } else {
+          placeHostSong(room.id, added.id, placement);
+        }
+        try {
+          refillOnDeck(room);
+        } catch (err) {
+          console.error(`[rotation:${room.code}] refill after a host add failed:`, err);
+        }
+        const io = getIO();
+        io.to(roomChannel(room.code)).emit(SOCKET_EVENTS.QUEUE_UPDATE, serializeQueue(room.id));
+        broadcastRotationState(io, room);
+        return { status: "added", placement: asked === "pin" ? "pin" : placement };
+      }
+
       const existing = findActiveItemByTrackUri(room.id, trackUri);
       if (existing) {
         const queue = serializeQueue(room.id);
@@ -250,6 +296,22 @@ export const queueRoutes: FastifyPluginAsync = async (app) => {
       getIO().to(roomChannel(room.code)).emit(SOCKET_EVENTS.QUEUE_UPDATE, queue);
 
       return { status: "added", item } satisfies AddToQueueResponse;
+    },
+  );
+
+  // Rotation mode: the host drags one of their songs to a slot in Coming up (null = back to house picks).
+  app.put<{ Params: { code: string; itemId: string }; Body: { slot?: number | null } }>(
+    "/rooms/:code/host-picks/:itemId/slot",
+    async (req, reply) => {
+      const host = getAuthenticatedHost(req);
+      if (!host) return reply.code(401).send({ error: "not_logged_in" });
+      const room = getRoomByCode(req.params.code);
+      if (!room || room.hostId !== host.id) return reply.code(404).send({ error: "room_not_found" });
+      const slot = req.body?.slot;
+      if (slot !== null && (typeof slot !== "number" || !Number.isFinite(slot))) return reply.code(400).send({ error: "invalid_slot" });
+      if (!setHostPickSlot(room.id, req.params.itemId, slot)) return reply.code(404).send({ error: "not_found" });
+      broadcastRotationState(getIO(), room);
+      return { ok: true };
     },
   );
 

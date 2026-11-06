@@ -1,8 +1,11 @@
 import type { Server } from "socket.io";
+import { and, eq } from "drizzle-orm";
+import { queueItems } from "../db/schema.js";
 import {
   SOCKET_EVENTS,
   priceFor,
-  clampTurnCredit,
+  rotationOrder,
+  type BoostedTurns,
   type MineQueueItemView,
   type OnDeckItemView,
   type RotationGuestView,
@@ -12,8 +15,8 @@ import {
   type HostUpcomingItemView,
 } from "@manyqueue/shared";
 import { db, type DB } from "../db/client.js";
-import { getOnDeckItems } from "../db/queue.js";
-import { getRotationRoster, getMineQueue, getPoolItems, type RotationState } from "../db/rotation.js";
+import { getOnDeckItems, getQueueItemById } from "../db/queue.js";
+import { getRotationRoster, getMineQueue, getPoolItems, getHouseItems, getPinnedHostItems, type RotationState } from "../db/rotation.js";
 import { getGuestsForRoom, type Guest } from "../db/guests.js";
 import { balance } from "../db/tokens.js";
 import { getRoomSettings } from "../db/settings.js";
@@ -47,26 +50,44 @@ export function buildMineView(roomId: string, guestId: string, database: DB = db
       dedication: p.dedication,
       inPool: true,
     }));
-  return [...mine, ...pooled];
+  // A song up for a fight, back in its place in the list when it loses.
+  const fighting = database
+    .select()
+    .from(queueItems)
+    .where(and(eq(queueItems.roomId, roomId), eq(queueItems.addedBy, guestId), eq(queueItems.status, "in_fight")))
+    .all()
+    .map((f) => ({
+      id: f.id,
+      trackUri: f.trackUri,
+      trackName: f.trackName,
+      artistName: f.artistName,
+      albumArtUrl: f.albumArtUrl,
+      durationMs: f.durationMs,
+      dedication: f.dedication,
+      inPool: false,
+      inFight: true,
+    }));
+  return [...mine, ...pooled, ...fighting];
 }
 
-/** Rotation order, credit-first — the same priority draft() would pick from, so a guest's index in
- * this array is genuinely "how many turns until yours" (§12's turn card). */
-function sortByTurnPriority(roster: RotationState[]): RotationState[] {
-  // Same clamp draft() applies before it picks, or a guest back from an empty queue with a big backlog
-  // of credit would show further ahead than draft() will actually put them.
-  const clamped = roster.map((r) => ({ row: r, credit: r.credit, weight: r.weight }));
-  clampTurnCredit(clamped.filter((c) => c.row.active));
-  const creditOf = new Map(clamped.map((c) => [c.row, c.credit]));
-  return [...roster].sort((a, b) => {
-    const aCredit = creditOf.get(a)!;
-    const bCredit = creditOf.get(b)!;
-    if (bCredit !== aCredit) return bCredit - aCredit;
-    const aLast = a.lastTurnAt?.getTime() ?? -Infinity;
-    const bLast = b.lastTurnAt?.getTime() ?? -Infinity;
-    if (aLast !== bLast) return aLast - bLast;
-    return a.joinedAt.getTime() - b.joinedAt.getTime();
-  });
+/** Rotation order, the same ranking draft() picks from (rotationOrder: owed this round first, then the
+ * next round), so a guest's index in this array is "how many turns until yours" (§12's turn card).
+ * Ranked as if everyone had songs; inactive guests last. */
+function sortByTurnPriority(roster: RotationState[], mode: BoostedTurns): RotationState[] {
+  const ranked = rotationOrder(
+    roster.map((r) => ({
+      id: r.guestId,
+      row: r,
+      credit: r.credit,
+      weight: r.weight,
+      lastTurnAt: r.lastTurnAt?.getTime() ?? null,
+      joinedAt: r.joinedAt.getTime(),
+      active: r.active,
+      queue: [null],
+    })),
+    mode,
+  ).map((x) => x.row);
+  return [...ranked, ...roster.filter((r) => !ranked.includes(r))];
 }
 
 export function buildRotationRoomView(room: Room, database: DB = db): RotationRoomView {
@@ -80,6 +101,7 @@ export function buildRotationRoomView(room: Room, database: DB = db): RotationRo
     trackName: item.trackName,
     artistName: item.artistName,
     albumArtUrl: item.albumArtUrl,
+    albumName: item.albumName,
     durationMs: item.durationMs,
     addedBy: item.anonymous || !item.addedBy ? null : guestGlance(guestById.get(item.addedBy)),
     isMystery: item.anonymous,
@@ -87,7 +109,7 @@ export function buildRotationRoomView(room: Room, database: DB = db): RotationRo
     pickedByCrowd: item.draftedBy === "crowd",
   }));
 
-  const roster = sortByTurnPriority(getRotationRoster(room.id, database).filter((r) => guestById.has(r.guestId)));
+  const roster = sortByTurnPriority(getRotationRoster(room.id, database).filter((r) => guestById.has(r.guestId)), getRoomSettings(room.id, database).boostedTurns);
   const rotation: RotationGuestView[] = roster.map((r) => {
     const guest = guestById.get(r.guestId)!;
     const count = mineCountByGuest.get(r.guestId) ?? 0;
@@ -100,11 +122,16 @@ export function buildRotationRoomView(room: Room, database: DB = db): RotationRo
     };
   });
 
-  const upcoming: UpcomingItemView[] = forecastUpcoming(room, database).map((slot) => ({
-    kind: slot.kind,
-    guestId: slot.kind === "guest" ? slot.ownerId : null,
-    addedBy: slot.kind === "guest" && slot.ownerId ? guestGlance(guestById.get(slot.ownerId)) : null,
-  }));
+  const showSongs = getRoomSettings(room.id, database).showUpcomingSongs;
+  const upcoming: UpcomingItemView[] = forecastUpcoming(room, database).map((slot) => {
+    const song = showSongs && (slot.kind === "guest" || slot.kind === "host") && slot.itemId ? getQueueItemById(slot.itemId, database) : undefined;
+    return {
+      kind: slot.kind,
+      guestId: slot.kind === "guest" ? slot.ownerId : null,
+      addedBy: slot.kind === "guest" && slot.ownerId ? guestGlance(guestById.get(slot.ownerId)) : null,
+      ...(song ? { trackName: song.trackName, artistName: song.artistName, albumArtUrl: song.albumArtUrl } : {}),
+    };
+  });
 
   return { onDeck, rotation, upcoming, ballot: buildBallotView(room, database) };
 }
@@ -125,6 +152,7 @@ export function buildHostRotationBoard(room: Room, database: DB = db): HostRotat
     trackName: item.trackName,
     artistName: item.artistName,
     albumArtUrl: item.albumArtUrl,
+    albumName: item.albumName,
     durationMs: item.durationMs,
     addedBy: item.anonymous || !item.addedBy ? null : guestGlance(guestById.get(item.addedBy)),
     isMystery: item.anonymous,
@@ -132,7 +160,7 @@ export function buildHostRotationBoard(room: Room, database: DB = db): HostRotat
     pickedByCrowd: item.draftedBy === "crowd",
   }));
 
-  const roster = sortByTurnPriority(getRotationRoster(room.id, database).filter((r) => guestById.has(r.guestId)));
+  const roster = sortByTurnPriority(getRotationRoster(room.id, database).filter((r) => guestById.has(r.guestId)), getRoomSettings(room.id, database).boostedTurns);
   const guests = roster.map((r) => {
     const guest = guestById.get(r.guestId)!;
     const mine = getMineQueue(room.id, r.guestId, database);
@@ -163,7 +191,19 @@ export function buildHostRotationBoard(room: Room, database: DB = db): HostRotat
     albumArtUrl: p.albumArtUrl,
   }));
 
-  const mineById = new Map(guests.flatMap((g) => g.songs.map((song) => [song.id, song] as const)));
+  const house = getHouseItems(room.id, database).map((h) => ({
+    id: h.id,
+    trackName: h.trackName,
+    artistName: h.artistName,
+    albumArtUrl: h.albumArtUrl,
+  }));
+
+  const pinnedItems = getPinnedHostItems(room.id, database);
+  const pinned = pinnedItems.map((p) => ({ id: p.id, trackName: p.trackName, artistName: p.artistName, albumArtUrl: p.albumArtUrl, slot: p.pinnedPosition ?? 0 }));
+  const mineById = new Map<string, { trackName: string; artistName: string; albumArtUrl: string | null }>([
+    ...guests.flatMap((g) => g.songs.map((song) => [song.id, song] as const)),
+    ...pinned.map((p) => [p.id, p] as const),
+  ]);
   const upcoming: HostUpcomingItemView[] = forecastUpcoming(room, database).map((slot) => {
     const song = slot.itemId ? mineById.get(slot.itemId) : undefined;
     return {
@@ -179,9 +219,9 @@ export function buildHostRotationBoard(room: Room, database: DB = db): HostRotat
 
   const commitsAt = vetoCommitsAt(room.id);
   // The window only opens with nothing next on deck, so the forecast's first slot is the pending draft.
-  const pendingDraft = commitsAt !== null && upcoming[0] ? { ...upcoming[0], commitsAt } : null;
+  const pendingDraft = commitsAt !== null && upcoming[0] && upcoming[0].kind !== "host" ? { ...upcoming[0], commitsAt } : null;
 
-  return { onDeck, guests, pool, upcoming, ballot: buildHostBallotView(room, database), pendingDraft };
+  return { onDeck, guests, pool, house, pinned, upcoming, ballot: buildHostBallotView(room, database), pendingDraft };
 }
 
 /** Just the shared view and the host board — after a Crowd pick vote, which changes nobody's own queue. */

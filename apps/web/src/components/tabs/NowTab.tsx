@@ -11,6 +11,7 @@ import { BallotCard } from "../BallotCard";
 import { useAnimatedProgress } from "../../hooks/useAnimatedProgress";
 import { useRoomStore } from "../../store/roomStore";
 import { formatDuration, spotifyTrackUrl } from "../../lib/format";
+import { CoverDecoration, useCoverDecor } from "../Holiday";
 
 const VINYL_KEY = "manyqueue_vinyl";
 
@@ -36,6 +37,7 @@ function formatCountdown(ms: number): string {
 }
 
 export function NowTab({ code, guestId }: { code: string; guestId: string }) {
+  const coverDecor = useCoverDecor();
   const queue = useRoomStore((s) => s.queue);
   const playback = useRoomStore((s) => s.playback);
   const clockOffsetMs = useRoomStore((s) => s.clockOffsetMs);
@@ -171,6 +173,12 @@ export function NowTab({ code, guestId }: { code: string; guestId: string }) {
           <span className="absolute bottom-1 right-1 grid h-8 w-8 place-items-center rounded-full bg-section text-accent-200 shadow-lg">
             {vinyl ? <ImageIcon size={16} /> : <VinylRecord size={16} />}
           </span>
+          {/* A round cover: the hat sits nearer the middle of the top than a square's corner. */}
+          {coverDecor(nowPlaying.trackName, nowPlaying.albumName) && (
+            <span className="pointer-events-none absolute" style={{ left: 50, top: 30, width: 180, height: 180 }}>
+              <CoverDecoration kind={coverDecor(nowPlaying.trackName, nowPlaying.albumName)!} size={180} />
+            </span>
+          )}
         </button>
 
         <div className="flex flex-col items-center gap-1 text-center">

@@ -1,5 +1,6 @@
+import { albumNameOf } from "../spotify.js";
 import crypto from "node:crypto";
-import { and, asc, eq, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import { loserOutcome, type ContestPoolEntryView } from "@manyqueue/shared";
 import { db as defaultDb, type DB } from "./client.js";
 import { contestPool, guests, queueItems } from "./schema.js";
@@ -41,12 +42,13 @@ export function isTrackInPool(roomId: string, trackUri: string, database: DB = d
     .get();
 }
 
-/** Every song sitting in the contest (the queue's own listings never include these). */
+/** Every song sitting in the contest (the queue's own listings never include these): Shared mode's
+ * "contest" rows and Rotation mode's "in_fight" ones (Fight for a spot, db/fight.ts). */
 export function listContestItems(roomId: string, database: DB = defaultDb): QueueItem[] {
   return database
     .select()
     .from(queueItems)
-    .where(and(eq(queueItems.roomId, roomId), eq(queueItems.status, "contest")))
+    .where(and(eq(queueItems.roomId, roomId), inArray(queueItems.status, ["contest", "in_fight"])))
     .all();
 }
 
@@ -93,6 +95,7 @@ export function enterContestPool(
       trackUri: params.trackUri,
       trackName: params.trackName,
       artistName: params.artistName,
+      albumName: albumNameOf(params.trackUri),
       albumArtUrl: params.albumArtUrl,
       durationMs: params.durationMs,
       addedBy: params.guestId,

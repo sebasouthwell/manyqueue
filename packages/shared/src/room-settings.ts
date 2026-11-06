@@ -36,6 +36,8 @@ export const RoomSettingsSchema = z.object({
   aiNicknames: z.enum(["off", "approve", "auto"]).default("approve"),
   /** The TV background follows the song's genre. */
   tvScenes: z.boolean().default(true),
+  /** Holiday decorations on the phones and TV: by date, off, or a holiday forced on. */
+  holidayMode: z.enum(["auto", "off", "halloween", "christmas"]).default("auto"),
   /** Tokens a co-host may hand out (positive grants) per rolling hour. The host has no limit — this
    * guards the room's token economy against a co-host giving too much away. */
   cohostGrantHourlyLimit: z.number().int().min(0).max(50).default(5),
@@ -54,6 +56,14 @@ export const RoomSettingsSchema = z.object({
   /** Rotation mode only: who pays by default when the host uses Draft now — a broke guest is always on
    * the house regardless (§9). */
   hostDraftPays: z.enum(["guest", "house"]).default("guest"),
+  /** Rotation order: everyone sees the actual songs in "Coming up", not just whose pick each one is. */
+  showUpcomingSongs: z.boolean().default(true),
+  /** Rotation order: Fight for a spot — guests put a song up for a 1-on-1 vote; the winner plays next
+   * without using its owner's turn (§11, D10). Always off in Crowd pick. */
+  fights: z.boolean().default(true),
+  /** Rotation order: where a boosted guest's extra turns in each round go — back to back with their
+   * normal turn ("together") or spaced through the round ("spread"). See BoostedTurns. */
+  boostedTurns: z.enum(["together", "spread"]).default("together"),
   /** Rotation mode only (§6, D5): how the next song is chosen. "crowd" = Crowd pick — guests vote on a
    * ballot of everyone's top song while the current one plays. */
   nextSongMethod: z.enum(["rotation", "crowd"]).default("rotation"),

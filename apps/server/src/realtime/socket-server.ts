@@ -20,7 +20,7 @@ import { countSongsFinished, getActiveQueueItems } from "../db/queue.js";
 import { recordReaction } from "../db/reactions.js";
 import { mostActiveGuest } from "../db/reaction-stats.js";
 import { getSpotifyStatus } from "../spotify.js";
-import { isAiConfigured } from "../ai/deepseek.js";
+import { isAiConfigured } from "../ai/provider.js";
 import { recapKey } from "../recap-access.js";
 import { sceneFor } from "../db/scene.js";
 import { getGuestById } from "../db/guests.js";

@@ -3,6 +3,7 @@ import {
   SOCKET_EVENTS,
   PERMISSION_LABELS,
   sanitizePermissions,
+  hasPermission,
   type GuestSummary,
   type Permission,
   type RoleChangedPayload,
@@ -10,6 +11,7 @@ import {
 } from "@manyqueue/shared";
 import { getAuthenticatedHost, requirePerm, requireStaff } from "../auth-helpers.js";
 import { getRoomByCode } from "../db/rooms.js";
+import { glitchStateOf } from "../db/glitch.js";
 import { getGuestsForRoom, getGuestById, setGuestRole, setGuestPerms } from "../db/guests.js";
 import { getRecentActionLog } from "../db/action-log.js";
 import { getRoomSettings } from "../db/settings.js";
@@ -52,13 +54,17 @@ export const roleRoutes: FastifyPluginAsync = async (app) => {
   app.get<{ Params: { code: string } }>("/rooms/:code/guests", async (req, reply) => {
     const room = getRoomByCode(req.params.code);
     if (!room) return reply.code(404).send({ error: "room_not_found" });
-    const actor = requirePerm(req, room, "tokens", "moderation");
+    const actor = requirePerm(req, room, "tokens", "moderation", "glitch");
     if (!actor) return reply.code(403).send({ error: "not_allowed" });
+    const canGlitch = hasPermission(actor, "glitch");
 
     const tokenMode = getRoomSettings(room.id).tokenMode;
-    const guests = getGuestsForRoom(room.id).map((g) =>
-      serializeGuestSummary(g, tokenMode ? balance(g.id) : null, room.id),
-    );
+    const guests = getGuestsForRoom(room.id).map((g) => ({
+      ...serializeGuestSummary(g, tokenMode ? balance(g.id) : null, room.id),
+      // The host's private notes are the host's alone.
+      ...(actor.hostId ? { hostNote: g.hostNote ?? null } : {}),
+      ...(canGlitch ? { glitch: glitchStateOf(g) } : {}),
+    }));
     return { guests };
   });
 

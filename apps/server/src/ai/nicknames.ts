@@ -12,7 +12,7 @@ import { db as defaultDb, type DB } from "../db/client.js";
 import { guests } from "../db/schema.js";
 import { bumpAiUsage, getAiUsage } from "../db/ai-nicknames.js";
 import { artistsForTasting, buildTasteProfiles } from "../db/taste.js";
-import { aiJsonCall, isAiConfigured } from "./deepseek.js";
+import { aiJsonCall, isAiConfigured } from "./provider.js";
 import { ensureGenres } from "./genres.js";
 
 export interface NicknameProposal {

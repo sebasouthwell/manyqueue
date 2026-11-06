@@ -5,7 +5,7 @@ import { guests, queueItems } from "../db/schema.js";
 import { addQueueItem, getOnDeckItems, getQueueItemById } from "../db/queue.js";
 import { updateRoomSettings } from "../db/settings.js";
 import { apply, balance } from "../db/tokens.js";
-import { ensureRotationState, getRotationRoster } from "../db/rotation.js";
+import { ensureRotationState, getRotationRoster, setHostPickSlot } from "../db/rotation.js";
 import { getRoomById } from "../db/rooms.js";
 import { refillOnDeck, forecastUpcoming } from "./rotation-loop.js";
 import type { DB } from "../db/client.js";
@@ -117,12 +117,12 @@ describe("refillOnDeck", () => {
 
     refillOnDeck(room, db);
     const roster = getRotationRoster("room-1", db);
-    // a turn costs only the guest who took it (clampTurnCredit): the drafted guests are down one turn
-    // each and stamped with it, the one still waiting is untouched — and all of it made it to the db
+    // the first refill opens round 1 (one turn each at ×1): the drafted guests have used theirs and are
+    // stamped with it, the one still waiting has theirs left — and all of it made it to the db
     const drafted = roster.filter((r) => r.lastTurnAt !== null);
     expect(drafted.length).toBeGreaterThan(0);
-    expect(drafted.every((r) => r.credit === -1)).toBe(true);
-    expect(roster.filter((r) => r.lastTurnAt === null).every((r) => r.credit === 0)).toBe(true);
+    expect(drafted.every((r) => r.credit === 0)).toBe(true);
+    expect(roster.filter((r) => r.lastTurnAt === null).every((r) => r.credit === 1)).toBe(true);
   });
 
   it("drafts at the last moment: nothing mid-song, the next song once it's due", () => {
@@ -227,5 +227,52 @@ describe("forecastUpcoming — Rotation's live main queue", () => {
     const db = createTestDb();
     seedRoomWithGuest(db);
     expect(forecastUpcoming(getRoomById("room-1", db)!, db)).toEqual([]);
+  });
+});
+
+describe("pinned host picks (dragged to a slot in Coming up)", () => {
+  function pinHostSong(db: DB, uri: string, slot: number) {
+    const item = addQueueItem({ roomId: "room-1", trackUri: uri, trackName: uri, artistName: "Host", albumArtUrl: null, durationMs: 180_000, addedBy: null }, db);
+    db.update(queueItems).set({ status: "house" }).where(eq(queueItems.id, item.id)).run();
+    expect(setHostPickSlot("room-1", item.id, slot, db)).toBe(true);
+    return item;
+  }
+
+  it("sits at its slot in the forecast, guests' songs flowing around it", () => {
+    const db = createTestDb();
+    setUpThreePhonesFiveSongs(db);
+    const host = pinHostSong(db, "host-song", 2);
+    const slots = forecastUpcoming(getRoomById("room-1", db)!, db);
+    expect(slots[2]).toEqual({ kind: "host", itemId: host.id, ownerId: null });
+    expect(slots.filter((s) => s.kind === "guest").length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("counts down as songs are drafted, then takes its slot before the next turn", () => {
+    const db = createTestDb();
+    setUpThreePhonesFiveSongs(db);
+    const host = pinHostSong(db, "host-song", 1);
+    const room = getRoomById("room-1", db)!;
+
+    // Slot 0 is a guest's: drafted, and the pin moves to slot 0.
+    refillOnDeck(room, db);
+    const first = getOnDeckItems("room-1", db)[0];
+    expect(first.addedBy).not.toBeNull();
+    expect(getQueueItemById(host.id, db)!.pinnedPosition).toBe(0);
+
+    // That song plays out: the host's song is next, ahead of everyone's turn.
+    db.update(queueItems).set({ status: "played" }).where(eq(queueItems.id, first.id)).run();
+    refillOnDeck(room, db);
+    const next = getOnDeckItems("room-1", db)[0];
+    expect(next.id).toBe(host.id);
+    expect(next.draftedBy).toBe("host");
+  });
+
+  it("unpinning sends it back to the house picks", () => {
+    const db = createTestDb();
+    setUpThreePhonesFiveSongs(db);
+    const host = pinHostSong(db, "host-song", 3);
+    setHostPickSlot("room-1", host.id, null, db);
+    expect(getQueueItemById(host.id, db)!.pinnedPosition).toBeNull();
+    expect(forecastUpcoming(getRoomById("room-1", db)!, db).some((s) => s.kind === "host")).toBe(false);
   });
 });

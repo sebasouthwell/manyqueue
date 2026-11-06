@@ -30,7 +30,7 @@ import {
   type AiNicknameRow,
 } from "../db/ai-nicknames.js";
 import { generateNicknames, type NicknameBatchResult } from "../ai/nicknames.js";
-import { isAiConfigured } from "../ai/deepseek.js";
+import { isAiConfigured } from "../ai/provider.js";
 import { emitToGuest, emitToStaff } from "./socket-server.js";
 import { showMoment } from "./moments.js";
 import { songsFinished } from "./game-rules.js";

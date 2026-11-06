@@ -1,0 +1,1 @@
+ALTER TABLE `guests` ADD `glitch_level` integer DEFAULT 0 NOT NULL;

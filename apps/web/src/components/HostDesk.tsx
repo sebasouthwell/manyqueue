@@ -22,6 +22,7 @@ import { GamesSection } from "./GamesSection";
 import { LiveGameCard } from "./LiveGameCard";
 import { ContestPanel } from "./ContestPanel";
 import { useGames } from "../hooks/useGames";
+import { HolidayDecor } from "./Holiday";
 
 type Section = "queue" | "games" | "people" | "recap" | "settings";
 
@@ -64,6 +65,7 @@ export function HostDesk({ room, settings, ending, onEndNight, onOpenTv, onDevic
 
   return (
     <div className="mx-auto flex w-full max-w-[1600px] flex-col gap-5 p-5">
+    <HolidayDecor variant="phone" />
     <SpotifyLimitBanner />
     <HostNowPlayingBanner code={room.code} />
     <div className="grid grid-cols-[216px_1fr_312px] gap-5">

@@ -14,6 +14,7 @@ import { Dialog } from "../Dialog";
 import { AddSheet } from "../AddSheet";
 import { BanPicker } from "../BanPicker";
 import { SpotifyLimitBanner } from "../SpotifyLimitBanner";
+import { HatCover } from "../Holiday";
 
 type AddState =
   | { kind: "idle" }
@@ -397,7 +398,7 @@ export function SearchTab({ code }: { code: string }) {
           return (
             <div key={track.uri} className="flex items-center gap-3 rounded-md bg-section p-2" style={banned ? { opacity: 0.45 } : undefined}>
               {track.albumArtUrl ? (
-                <img src={track.albumArtUrl} alt="" className="h-12 w-12 rounded" />
+                <HatCover trackName={track.name} size={48}><img src={track.albumArtUrl} alt="" className="h-12 w-12 rounded" /></HatCover>
               ) : (
                 <div className="h-12 w-12 rounded bg-accent-800" />
               )}

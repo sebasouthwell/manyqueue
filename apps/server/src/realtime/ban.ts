@@ -1,3 +1,4 @@
+import { forgetRemovedItem } from "./player-loop.js";
 import crypto from "node:crypto";
 import type { Server } from "socket.io";
 import {
@@ -153,6 +154,7 @@ function onBanClosed(vote: Vote, result: VoteResult, room: Room): void {
       // Refund first: the row is marked skipped straight after, and the refund only needs its cost.
       refundAdder(io, room, item.id);
       removeQueuedItem(item.id);
+      forgetRemovedItem(room.code, item.id);
       maybeApplyFairOrder(room);
       maybeRecomputeApprovalLockAt(room);
       io.to(roomChannel(room.code)).emit(SOCKET_EVENTS.QUEUE_UPDATE, serializeQueue(room.id));

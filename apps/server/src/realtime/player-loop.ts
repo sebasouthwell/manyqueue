@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import {
   onPoll,
   pollDelayMs,
@@ -22,11 +23,15 @@ import {
   markQueueItemPlayed,
   autoApprovePendingItems,
   serializeQueue,
+  markQueueItemSkipped,
+  refundQueueItem,
 } from "../db/queue.js";
+import { emitToGuest, emitToStaff } from "./socket-server.js";
 import { getRoomSettings } from "../db/settings.js";
 import { refillOnDeck } from "./rotation-loop.js";
 import { crowdTick } from "./crowd-pick.js";
 import { vetoTick } from "./draft-veto.js";
+import { maybeDefrost, isDefrostHolding } from "./defrost.js";
 import { broadcastRotationState } from "./rotation-views.js";
 import {
   getPlaybackState,
@@ -36,6 +41,10 @@ import {
   SpotifyQuotaError,
   playTrackOnDevice,
   SpotifyQueueBlockedError,
+  SpotifyPlayUnconfirmedError,
+  SpotifyTrackUnplayableError,
+  isPlayableHere,
+  sameSong,
   queueTrackOnDevice,
   skipToNext,
 } from "../spotify.js";
@@ -141,6 +150,7 @@ function ensureFallbackFilled(room: Room): boolean {
     trackName: track.name,
     artistName: track.artistName,
     albumArtUrl: track.albumArtUrl,
+        albumName: track.albumName,
     durationMs: track.durationMs,
     addedBy: null,
     source: "fallback",
@@ -187,6 +197,44 @@ const AWAIT_WINDOW_MS = 15_000;
 /** Draft the next song this much before the handoff window opens, so it's on deck when that poll lands. */
 const DRAFT_LEAD_MS = 2_000;
 
+/** The last unconfirmed play per room: what we asked for and what Spotify played instead. */
+const unconfirmed = new Map<string, { asked: string; got: string }>();
+
+/**
+ * A jammed player (seen live on desktop Spotify): every play lands on nothing, and nothing remote clears
+ * it, only restarting the Spotify app. After three "nothing is playing" answers in a row the loop stops
+ * sending play requests, tells the host what to do, and waits until the device plays something again
+ * (any track) or two minutes pass.
+ */
+const stalled = new Map<string, { misses: number; until: number; warned: boolean }>();
+/** The last on-deck refill failure logged per room (so a standing one is logged once). */
+const lastRefillError = new Map<string, string>();
+
+/** A song Spotify can't play in the host's region: take it out (refunded) so the room moves on. */
+function skipUnplayable(room: Room, uri: string): void {
+  const item = [...getOnDeckItems(room.id), ...getActiveQueueItems(room.id)].find((i) => i.trackUri === uri && i.status !== "playing");
+  if (!item) return;
+  const settings = getRoomSettings(room.id);
+  refundQueueItem(item, "refund_reject", settings.tokenCap);
+  markQueueItemSkipped(item.id, false);
+  const io = getIO();
+  if (item.addedBy) {
+    emitToGuest(io, room.code, item.addedBy, SOCKET_EVENTS.TOAST, {
+      id: crypto.randomUUID(),
+      message: `"${item.trackName}" isn't available on Spotify here, so it was skipped`,
+      guestVisible: true,
+    });
+  }
+  emitToStaff(io, room.code, SOCKET_EVENTS.TOAST, { id: crypto.randomUUID(), message: `Skipped "${item.trackName}": not available in this Spotify region` });
+  try {
+    refillOnDeck(room);
+  } catch (err) {
+    console.error(`[player-loop:${room.code}] refill after skipping an unplayable song failed:`, err);
+  }
+  io.to(`room:${room.code}`).emit(SOCKET_EVENTS.QUEUE_UPDATE, serializeQueue(room.id));
+  if (settings.mode === "rotation") broadcastRotationState(io, room);
+}
+
 function scheduleNextPoll(loop: RunningLoop, roomId: string): void {
   const st = loop.state;
   const now = Date.now();
@@ -228,6 +276,8 @@ async function runTick(roomCode: string, loop: RunningLoop): Promise<void> {
     stopPlayerLoop(roomCode);
     return;
   }
+  // Spotify is held paused for the defrost moment; it restarts the song itself when the ice shatters.
+  if (isDefrostHolding(room.id)) return;
 
   const fallbackFilled = ensureFallbackFilled(room);
   // refillOnDeck() throws when Rotation mode genuinely has nothing left to draft and no fallback
@@ -267,8 +317,15 @@ async function runTick(roomCode: string, loop: RunningLoop): Promise<void> {
       console.error(`[player-loop:${roomCode}] draft veto tick failed:`, err);
     }
     onDeckRefilled = refillOnDeck(room, undefined, { nextDue }) || ballotChanged || vetoChanged;
+    lastRefillError.delete(roomCode);
   } catch (err) {
-    console.error(`[player-loop:${roomCode}] on-deck refill failed:`, err);
+    // The same reason every 3s (no fallback playlist and nothing left to draft) is one log line, not
+    // thousands: logged again only when the reason changes.
+    const reason = err instanceof Error ? err.message : String(err);
+    if (lastRefillError.get(roomCode) !== reason) {
+      lastRefillError.set(roomCode, reason);
+      console.error(`[player-loop:${roomCode}] on-deck refill failed:`, err);
+    }
   }
   if (fallbackFilled || onDeckRefilled) {
     getIO()
@@ -276,6 +333,16 @@ async function runTick(roomCode: string, loop: RunningLoop): Promise<void> {
       .emit(SOCKET_EVENTS.QUEUE_UPDATE, serializeQueue(room.id));
   }
   if (onDeckRefilled) broadcastRotationState(getIO(), room);
+
+  // Up next can't play in this region (a song added before search hid those, or a fallback track): take it
+  // out now, so it never sits locked in while the speaker idles and never reaches Spotify. Cached per
+  // track, so this is one lookup per new song.
+  for (let i = 0; i < 3; i++) {
+    const next = getOnDeckItems(room.id).find((it) => it.status !== "playing");
+    if (!next || (await isPlayableHere(room.hostId, next.trackUri).catch(() => null)) !== false) break;
+    console.warn(`[player-loop:${roomCode}] up next ${next.trackUri} isn't playable in this region: skipping it`);
+    skipUnplayable(room, next.trackUri);
+  }
 
   const settings = getRoomSettings(room.id);
   if (settings.approvals) {
@@ -365,6 +432,21 @@ async function runTick(roomCode: string, loop: RunningLoop): Promise<void> {
         sampledAt: Date.now(),
       };
 
+  // Our handed-off song playing under another id (relinking: an album's copy vs a single's). Seen live on
+  // every handoff of such a song: the state machine took it for a stranger's, sent play for our id and
+  // restarted the song a few seconds in. Recognise it here, so it counts as ours on the first sighting.
+  const expected = loop.state.expectedNextUri;
+  if (
+    poll.trackUri &&
+    expected &&
+    poll.trackUri !== expected &&
+    poll.trackUri !== loop.state.currentTrackUri &&
+    (await sameSong(room.hostId, poll.trackUri, expected).catch(() => false))
+  ) {
+    console.log(`[player-loop:${roomCode}] ${poll.trackUri} is our ${expected} under another id: taking it as ours`);
+    loop.state = { ...loop.state, expectedNextUri: poll.trackUri };
+  }
+
   const { state: nextState, actions } = onPoll(loop.state, poll, queueSnapshot(room.id));
   loop.state = nextState;
   loop.progressAt = poll.sampledAt;
@@ -375,24 +457,67 @@ async function runTick(roomCode: string, loop: RunningLoop): Promise<void> {
 
   for (const action of actions) {
     switch (action.type) {
-      case "spotify:play":
+      case "spotify:play": {
+        const stall = stalled.get(roomCode);
+        if (stall && stall.misses >= 3) {
+          // Jammed: wait for a human (or the two minutes) instead of hammering it.
+          if (poll.trackUri || Date.now() > stall.until) stalled.delete(roomCode);
+          else break;
+        }
         await playTrackOnDevice(room.hostId, action.deviceId, action.uri)
           .then((playing) => {
+            unconfirmed.delete(roomCode);
+            stalled.delete(roomCode);
             // Same song under a relinked id: expect that id, or the next poll takes it for a stranger's.
             if (playing !== action.uri && loop.state.expectedNextUri === action.uri) {
               loop.state = { ...loop.state, expectedNextUri: playing };
             }
           })
           .catch((err) => {
+            if (err instanceof SpotifyTrackUnplayableError) {
+              console.warn(`[player-loop:${roomCode}] ${err.uri} isn't playable in this region: skipping it`);
+              skipUnplayable(room, err.uri);
+              return;
+            }
+            if (err instanceof SpotifyPlayUnconfirmedError && err.playing === null) {
+              const s = stalled.get(roomCode) ?? { misses: 0, until: 0, warned: false };
+              s.misses++;
+              if (s.misses >= 3) {
+                s.until = Date.now() + 120_000;
+                if (!s.warned) {
+                  s.warned = true;
+                  emitToStaff(getIO(), room.code, SOCKET_EVENTS.TOAST, {
+                    id: crypto.randomUUID(),
+                    message: `Spotify on ${room.deviceName ?? "the speaker"} has stopped responding. Restart Spotify there and press play on any song; the party picks up from there.`,
+                  });
+                }
+              }
+              stalled.set(roomCode, s);
+            }
           // Too many songs queued in Spotify itself ahead of ours: the host's Resync banner explains it.
             if (err instanceof SpotifyQueueBlockedError) broadcastQueueWarning(room, err.foreignAhead);
+            // Never loop on a substitute: when Spotify answers our request with the same other track twice
+            // running, that track is what it plays for ours (a relinked copy the same-song check missed),
+            // so expect it rather than asking again and restarting it every tick.
+            if (err instanceof SpotifyPlayUnconfirmedError && err.playing) {
+              const seen = unconfirmed.get(roomCode);
+              if (seen && seen.asked === action.uri && seen.got === err.playing && loop.state.expectedNextUri === action.uri) {
+                console.warn(`[player-loop:${roomCode}] Spotify plays ${err.playing} for ${action.uri} twice running: taking it as ours`);
+                loop.state = { ...loop.state, expectedNextUri: err.playing };
+                unconfirmed.delete(roomCode);
+              } else {
+                unconfirmed.set(roomCode, { asked: action.uri, got: err.playing });
+              }
+            }
             console.error(`[player-loop:${roomCode}] play failed:`, err);
           });
         break;
+      }
       case "spotify:queue":
-        await queueTrackOnDevice(room.hostId, action.deviceId, action.uri).catch((err) =>
-          console.error(`[player-loop:${roomCode}] queue failed:`, err),
-        );
+        await queueTrackOnDevice(room.hostId, action.deviceId, action.uri).catch((err) => {
+          if (err instanceof SpotifyTrackUnplayableError) return skipUnplayable(room, err.uri);
+          console.error(`[player-loop:${roomCode}] queue failed:`, err);
+        });
         break;
       case "spotify:next":
         await skipToNext(room.hostId, action.deviceId).catch((err) =>
@@ -408,7 +533,8 @@ async function runTick(roomCode: string, loop: RunningLoop): Promise<void> {
         io.to(channel).emit(SOCKET_EVENTS.QUEUE_UPDATE, serializeQueue(room.id));
         {
           const started = getQueueItemById(action.queueItemId);
-          if (started) onSongStarted(io, room, started);
+          // November's first Mariah: the TV ices over first (and shows any dedication itself).
+          if (started) onSongStarted(io, room, started, Math.random, { skipDedication: maybeDefrost(io, room, started) });
         }
         break;
       case "db:markPlayed":
@@ -522,6 +648,25 @@ export function pokePlayerLoop(roomCode: string): void {
   const loop = runningLoops.get(roomCode);
   if (!loop) return;
   loop.nextPollAt = Math.min(loop.nextPollAt, Date.now() + POKE_DELAY_MS);
+}
+
+/**
+ * A song was removed from the room after the loop had already claimed it (the first start of a night
+ * claims its song without marking it in the database, so it stays removable). Forget it: otherwise the
+ * loop kept treating it as the room's song and it played on as a ghost (seen live). If Spotify is
+ * already playing it, it's now a stranger's song, and the room's next one takes over at the next poll.
+ */
+export function forgetRemovedItem(roomCode: string, itemId: string): void {
+  const loop = runningLoops.get(roomCode);
+  if (!loop) return;
+  const st = loop.state;
+  if (st.lockedQueueItemId === itemId) {
+    loop.state = { ...st, lockedQueueItemId: null, expectedNextUri: null, startAttemptedAt: null };
+  }
+  if (loop.state.currentQueueItemId === itemId) {
+    loop.state = { ...loop.state, currentQueueItemId: null };
+  }
+  pokePlayerLoop(roomCode);
 }
 
 export function stopPlayerLoop(roomCode: string): void {

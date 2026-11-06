@@ -191,18 +191,30 @@ export function onPoll(
     next.pendingTrackChange = null;
   }
 
-  // --- Starting: nothing playing, we have a queue, and we're not already mid-handoff ---
+  // --- Starting: nothing of ours playing, we have a queue, and we're not already mid-handoff ---
+  // "Nothing of ours" includes Spotify carrying on by itself (autoplay after the room ran dry, seen live
+  // with no fallback playlist): without this the room's next song waited for that track to end, and only
+  // re-picking the speaker got things moving. A paused speaker still counts as nothing playing.
+  const foreignPlaying =
+    poll.isPlaying &&
+    !!poll.trackUri &&
+    poll.trackUri !== state.expectedNextUri &&
+    !queue.some((q) => q.trackUri === poll.trackUri);
+  // The snapshot was taken before this poll: a song it just marked played is still in it, and must
+  // never be started again (it would replay the moment the room ran dry).
+  const playedNow = new Set(actions.flatMap((a) => (a.type === "db:markPlayed" ? [a.queueItemId] : [])));
+  const startable = queue.filter((q) => !playedNow.has(q.id));
   if (
-    !poll.isPlaying &&
+    (!poll.isPlaying || foreignPlaying) &&
     !next.currentQueueItemId &&
     (!next.lockedQueueItemId ||
       (next.startAttemptedAt !== null && poll.sampledAt - next.startAttemptedAt >= START_RETRY_MS)) &&
-    queue.length > 0 &&
+    startable.length > 0 &&
     next.speakerStatus === "connected"
   ) {
     // Before the retry, a start the speaker ignored kept its lock for good and the room stayed
     // silent until the host re-picked the speaker.
-    const first = queue[0];
+    const first = startable[0];
     actions.push({ type: "spotify:play", deviceId: state.deviceId!, uri: first.trackUri });
     next.lockedQueueItemId = first.id;
     next.expectedNextUri = first.trackUri;

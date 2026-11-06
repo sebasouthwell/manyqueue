@@ -67,6 +67,7 @@ const ACTION_VERBS: Record<string, string> = {
   announce_block: "blocked announcements for",
   ballot_pull: "pulled",
   draft_skip: "skipped",
+  reorder_queue: "rearranged the queue of",
   rotation_draft: "drafted",
   rotation_skip: "skipped the next turn of",
   rotation_weight: "set the turn weight of",

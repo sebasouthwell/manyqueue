@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { FIRE_REACTION, type Permission, sanitizeReactionSet, shouldOpenVote, type ReactionEmoji } from "@manyqueue/shared";
+import { FIRE_REACTION, type GlitchState, type Permission, sanitizeReactionSet, shouldOpenVote, type ReactionEmoji } from "@manyqueue/shared";
 import type {
   RoomStateSnapshot,
   ToastPayload,
@@ -54,6 +54,18 @@ interface RoomStore {
   /** Rotation mode only, private: my own turn weight, only ever set when it's above x1 (§8). */
   myWeight: number | null;
   setMyWeight: (myWeight: number) => void;
+  /** Easter egg: this guest's glitch as the host set it (see GlitchController). */
+  myGlitch: GlitchState | null;
+  setMyGlitch: (myGlitch: GlitchState | null) => void;
+  /** What's actually running on this phone right now: level, and whether it skips the slow build. */
+  glitchLive: { level: number; instant: boolean } | null;
+  setGlitchLive: (live: { level: number; instant: boolean } | null) => void;
+  /** Easter egg, host desk: glitch mode unlocked by typing "glitch" on Settings. */
+  glitchMode: boolean;
+  setGlitchMode: (on: boolean) => void;
+  /** Glitch mode: shows the real "Reconnecting…" pill for a moment while still connected. */
+  fakeOffline: boolean;
+  setFakeOffline: (on: boolean) => void;
   voteTally: VoteTallyPayload | null;
   settings: RoomSettings | null;
   tokenBalance: number | null;
@@ -149,6 +161,10 @@ export const useRoomStore = create<RoomStore>((set) => ({
   rotationRoom: null,
   rotationHost: null,
   myWeight: null,
+  myGlitch: null,
+  glitchLive: null,
+  fakeOffline: false,
+  glitchMode: typeof localStorage !== "undefined" && localStorage.getItem("mq-glitch-mode") === "1",
   voteTally: null,
   settings: null,
   tokenBalance: null,
@@ -225,6 +241,17 @@ export const useRoomStore = create<RoomStore>((set) => ({
   setRotationRoom: (rotationRoom) => set({ rotationRoom }),
   setRotationHost: (rotationHost) => set({ rotationHost }),
   setMyWeight: (myWeight) => set({ myWeight }),
+  setMyGlitch: (myGlitch) => set({ myGlitch }),
+  setGlitchLive: (glitchLive) => set({ glitchLive }),
+  setFakeOffline: (fakeOffline) => set({ fakeOffline }),
+  setGlitchMode: (glitchMode) => {
+    try {
+      localStorage.setItem("mq-glitch-mode", glitchMode ? "1" : "0");
+    } catch {
+      /* private mode: still works for this visit */
+    }
+    set({ glitchMode });
+  },
   setVoteTally: (voteTally) => set({ voteTally }),
   setSettings: (settings) => set({ settings }),
   setTokenBalance: (tokenBalance) => set({ tokenBalance }),

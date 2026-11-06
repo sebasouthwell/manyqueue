@@ -9,7 +9,7 @@ import {
 import { db as defaultDb, type DB } from "../db/client.js";
 import { getCachedGenres, saveGenres } from "../db/genres.js";
 import { bumpAiUsage, getAiUsage } from "../db/ai-nicknames.js";
-import { aiJsonCall, isAiConfigured } from "./deepseek.js";
+import { aiJsonCall, isAiConfigured } from "./provider.js";
 
 /**
  * Genre tags for artists, by artist key. Cached tags are used as they are; artists with none get ONE

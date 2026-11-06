@@ -21,11 +21,12 @@ import { gamesRoutes } from "./routes/games.js";
 import { hostControlRoutes } from "./routes/host-controls.js";
 import { settingsRoutes } from "./routes/settings.js";
 import { roleRoutes } from "./routes/roles.js";
+import { hostNoteRoutes } from "./routes/host-notes.js";
 import { peopleLockRoutes } from "./routes/people-lock.js";
 import { aiNicknameRoutes } from "./routes/ai-nicknames.js";
 import { recapRoutes } from "./routes/recap.js";
 import { initAiNicknames } from "./realtime/ai-nicknames.js";
-import { setAiLogger } from "./ai/deepseek.js";
+import { setAiLogger } from "./ai/provider.js";
 import { moderationRoutes } from "./routes/moderation.js";
 import { resyncRoutes } from "./routes/resync.js";
 import { setupSocketServer } from "./realtime/socket-server.js";
@@ -49,18 +50,17 @@ const isProd = process.env.NODE_ENV === "production";
 const PORT = Number(process.env.PORT ?? 3000);
 const HOST = "0.0.0.0";
 
-// trustProxy: the app is proxied (the dev HMR tunnel, and — when running behind cloudflared for the
-// public tunnel — Cloudflare itself). Without it, req.ip is always the proxy's own address (127.0.0.1
-// for cloudflared, since it connects locally): every guest looks identical, IP-based device blocking
-// blocks nobody in particular, and once one guest's "IP" is blocked, every future guest matches it too.
+// trustProxy: the app usually sits behind a proxy (a reverse proxy, a CDN or a tunnel). Without it,
+// req.ip is always the proxy's own address: every guest looks identical, IP-based device blocking blocks
+// nobody in particular, and once one guest's "IP" is blocked, every future guest matches it too.
 //
 // A hop count, not `true`: `true` takes the leftmost X-Forwarded-For entry, which is whatever the client
-// sent (nginx appends to it, it doesn't replace it), so anyone could pick their own "IP" and walk past
-// kick blocks and the join limit. Live is Cloudflare → nginx → app, so the real client is 2 hops back.
-// Without Cloudflare in front this degrades to the old behaviour, never to "everyone shares one IP".
+// sent (proxies append to it, they don't replace it), so anyone could pick their own "IP" and walk past
+// kick blocks and the join limit. Set TRUST_PROXY_HOPS to the number of proxies in front (default 2,
+// e.g. a CDN in front of a reverse proxy). With fewer in front, it degrades safely.
 const TRUST_PROXY_HOPS = Number(process.env.TRUST_PROXY_HOPS ?? 2);
 // A function, not the number: this Fastify version's types don't take a hop count. Index 0 is the
-// socket peer (nginx), 1 the address nginx saw (Cloudflare's edge), 2 the client Cloudflare saw.
+// socket peer, 1 the address it saw, and so on back to the client.
 const app = Fastify({ logger: true, trustProxy: (_addr: string, hop: number) => hop < TRUST_PROXY_HOPS });
 
 // Signs host/guest session cookies and recap links: never run without it (no weak fallback).
@@ -88,6 +88,7 @@ await app.register(gamesRoutes);
 await app.register(hostControlRoutes);
 await app.register(settingsRoutes);
 await app.register(roleRoutes);
+await app.register(hostNoteRoutes);
 await app.register(peopleLockRoutes);
 await app.register(aiNicknameRoutes);
 await app.register(recapRoutes);

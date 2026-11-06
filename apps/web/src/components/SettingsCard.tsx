@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import type { RoomSettings } from "@manyqueue/shared";
 import { useRoomStore } from "../store/roomStore";
+import { Dialog } from "./Dialog";
 
 interface SettingsCardProps {
   code: string;
@@ -91,6 +92,26 @@ function SettingsGroup({ title, children }: { title: string; children: ReactNode
 
 export function SettingsCard({ code, settings }: SettingsCardProps) {
   const aiAvailable = useRoomStore((s) => s.aiNicknamesAvailable);
+  // The boosted-turns choice only matters once somebody has more than one turn per round.
+  const anyoneBoosted = useRoomStore((s) => s.rotationHost?.guests.some((g) => g.weight > 1) ?? false);
+  // Easter egg: type g-l-i-t-c-h anywhere on this page (not in a field) to toggle glitch mode.
+  const glitchMode = useRoomStore((s) => s.glitchMode);
+  const setGlitchMode = useRoomStore((s) => s.setGlitchMode);
+  const [glitchPrompt, setGlitchPrompt] = useState(false);
+  useEffect(() => {
+    let typed = "";
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (t?.closest("input, textarea, select, [contenteditable]") || e.key.length !== 1) return;
+      typed = (typed + e.key.toLowerCase()).slice(-6);
+      if (typed === "glitch") {
+        typed = "";
+        setGlitchPrompt(true);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
   async function patch(update: Partial<RoomSettings>) {
     await fetch(`/rooms/${code}/settings`, {
       method: "PATCH",
@@ -109,8 +130,28 @@ export function SettingsCard({ code, settings }: SettingsCardProps) {
 
   const isRotation = settings.mode === "rotation";
 
+
   return (
     <div className="flex w-full flex-col gap-4 rounded-lg bg-panel ring-1 ring-panel-line p-4 text-left">
+      {glitchPrompt && (
+        <Dialog
+          title={glitchMode ? "🌀 Glitch mode is on" : "🌀 Enable glitch mode?"}
+          body={
+            <p className="text-sm text-accent-200">
+              {glitchMode
+                ? "Turn it off? Anyone you've glitched stays glitched until you set their dial back to 0."
+                : "Open People, tap a guest, and turn their glitch dial. Their app gets… interesting. Secret notes to them arrive as a hack."}
+            </p>
+          }
+          primaryLabel={glitchMode ? "Turn off" : "Enable"}
+          onPrimary={() => {
+            setGlitchMode(!glitchMode);
+            setGlitchPrompt(false);
+          }}
+          secondaryLabel="Cancel"
+          onSecondary={() => setGlitchPrompt(false)}
+        />
+      )}
       <p className="text-xs uppercase tracking-wide text-accent-300">Settings</p>
 
       <div className="flex flex-wrap gap-3">
@@ -215,6 +256,52 @@ export function SettingsCard({ code, settings }: SettingsCardProps) {
                 );
               })}
             </div>
+            {settings.nextSongMethod === "rotation" && (
+              <Toggle
+                label="Show everyone the songs coming up (not just whose pick)"
+                checked={settings.showUpcomingSongs}
+                onChange={(v) => patch({ showUpcomingSongs: v })}
+              />
+            )}
+            {settings.nextSongMethod === "rotation" && (
+              <Toggle
+                label="Fight for a spot (winner plays next, keeps their turn)"
+                checked={settings.fights}
+                onChange={(v) => patch({ fights: v })}
+              />
+            )}
+            {settings.nextSongMethod === "rotation" && anyoneBoosted && (
+              <div className="flex flex-col gap-1">
+                <p className="text-xs text-accent-200">Boosted guests' extra songs</p>
+                <div className="flex gap-1 rounded-lg bg-panel p-1" role="radiogroup" aria-label="Boosted guests' extra songs">
+                  {(
+                    [
+                      ["together", "Back to back"],
+                      ["spread", "Spread out"],
+                    ] as const
+                  ).map(([value, label]) => {
+                    const selected = settings.boostedTurns === value;
+                    return (
+                      <button
+                        key={value}
+                        type="button"
+                        role="radio"
+                        aria-checked={selected}
+                        onClick={() => patch({ boostedTurns: value })}
+                        className={`flex-1 whitespace-nowrap rounded-md px-2 py-1.5 text-center text-xs font-semibold transition-colors ${
+                          selected ? "bg-accent text-bg" : "text-accent-200 hover:bg-panel-line/70"
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    );
+                  })}
+                </div>
+                <p className="text-accent-300 text-[10px]">
+                  A ×2 guest gets two songs each round: played together (A A B C D) or spaced out (A B A C D).
+                </p>
+              </div>
+            )}
             {settings.nextSongMethod === "crowd" && (
               <>
                 <div className="flex flex-wrap gap-2">
@@ -226,7 +313,7 @@ export function SettingsCard({ code, settings }: SettingsCardProps) {
               </>
             )}
             <p className="text-accent-300 text-[10px]">
-              Rotation order: everyone takes turns. Crowd pick: while a song plays, guests vote on everyone's top song (no names shown) and the winner plays next. A song that keeps losing becomes a 🔥 Wildcard and plays anyway. Songs too short to vote on, and skips with no votes, go by rotation order. Not in DJ mode.
+              Rotation order: everyone takes turns, one song each per round (boosted guests get more). Crowd pick: while a song plays, guests vote on everyone's top song (no names shown) and the winner plays next. A song that keeps losing becomes a 🔥 Wildcard and plays anyway. Songs too short to vote on, and skips with no votes, go by rotation order. Not in DJ mode.
             </p>
           </SettingsGroup>
         )}
@@ -260,6 +347,39 @@ export function SettingsCard({ code, settings }: SettingsCardProps) {
 
         <SettingsGroup title="TV">
           <Toggle label="Genre scenes" checked={settings.tvScenes} onChange={(v) => patch({ tvScenes: v })} />
+          <div className="flex flex-col gap-1">
+            <p className="text-xs text-accent-200">Holiday mode</p>
+            <div className="flex gap-1 rounded-lg bg-panel p-1" role="radiogroup" aria-label="Holiday mode">
+              {(
+                [
+                  ["auto", "By date"],
+                  ["halloween", "🎃 Halloween"],
+                  ["christmas", "🎄 Christmas"],
+                  ["off", "Off"],
+                ] as const
+              ).map(([value, label]) => {
+                const selected = settings.holidayMode === value;
+                return (
+                  <button
+                    key={value}
+                    type="button"
+                    role="radio"
+                    aria-checked={selected}
+                    onClick={() => patch({ holidayMode: value })}
+                    className={`flex-1 whitespace-nowrap rounded-md px-2 py-1.5 text-center text-xs font-semibold transition-colors ${
+                      selected ? "bg-accent text-bg" : "text-accent-200 hover:bg-panel-line/70"
+                    }`}
+                  >
+                    {label}
+                  </button>
+                );
+              })}
+            </div>
+            <p className="text-accent-300 text-[10px]">
+              Halloween: cobwebs and pumpkins (and bats on the TV). Christmas: snow, and Christmas songs get a Santa hat on
+              the TV. By date: Halloween 15 Oct–1 Nov, Christmas 1–26 Dec.
+            </p>
+          </div>
           <p className="text-accent-300 text-[10px]">The TV background changes with the song's genre: warm for salsa, neon for EDM, and so on.</p>
         </SettingsGroup>
 

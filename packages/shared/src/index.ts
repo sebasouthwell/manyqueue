@@ -30,3 +30,4 @@ export * from "./moments.js";
 export * from "./toast-queue.js";
 export * from "./announcement.js";
 export * from "./rotation.js";
+export * from "./holiday.js";

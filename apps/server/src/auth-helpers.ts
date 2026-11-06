@@ -91,6 +91,7 @@ export function requirePerm(req: FastifyRequest, room: Room, ...perms: Permissio
 export function requireStaff(req: FastifyRequest, room: Room): Actor | null {
   const actor = getActorRole(req, room);
   if (!actor) return null;
-  if (actor.role !== "guest" || (actor.perms?.length ?? 0) > 0) return actor;
+  // The secret glitch grant doesn't make anyone staff.
+  if (actor.role !== "guest" || (actor.perms ?? []).some((p) => p !== "glitch")) return actor;
   return null;
 }
